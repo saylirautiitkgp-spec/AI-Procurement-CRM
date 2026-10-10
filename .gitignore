@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Agentic runtime (local, generated)
+.venv-agentic/
+.pytest_cache/
+__pycache__/
+*.pyc
+data/

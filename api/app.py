@@ -17,3 +17,11 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+# Agentic runtime (LangGraph). Optional: the legacy backend keeps working in environments where the
+# agentic dependencies are not installed.
+try:
+    from api.agentic_routes import router as agentic_router
+    app.include_router(agentic_router)
+except ImportError:  # pragma: no cover
+    pass

@@ -32,9 +32,13 @@ class Orchestrator:
     # INITIALIZATION
     # =====================================================
 
-    def __init__(self, dry_run=False):
+    def __init__(self, dry_run=False, merge_duplicates=False):
 
         self.dry_run = dry_run
+
+        # Automatic merge_all() deletes records without review, so it is OFF by
+        # default. Merges must go through a reviewed, approved merge plan.
+        self.merge_duplicates = merge_duplicates
 
         # -------------------------------------------------
         # AGENT REGISTRY
@@ -411,9 +415,19 @@ class Orchestrator:
         # DUPLICATE MANAGEMENT
         # -------------------------------------------------
 
-        self._run_duplicate_manager(
-            context
-        )
+        if self.merge_duplicates:
+
+            self._run_duplicate_manager(
+                context
+            )
+
+        else:
+
+            context.add_execution_log(
+                agent_name="DuplicateManager",
+                status="SKIPPED",
+                message="Automatic merge disabled; use a reviewed merge plan"
+            )
 
         # -------------------------------------------------
         # EXECUTION STATISTICS

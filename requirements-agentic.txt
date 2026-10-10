@@ -1,0 +1,16 @@
+# Dependencies for the agentic runtime (install in .venv-agentic; UTF-8, all free/open-source).
+langgraph==1.2.14
+langgraph-checkpoint-sqlite==3.1.1
+pydantic>=2.7
+requests
+beautifulsoup4
+python-dotenv
+tenacity
+fastapi
+httpx
+uvicorn
+pytest
+# Provider SDKs (only used when live calls are explicitly enabled)
+google-genai==2.12.0
+tavily-python==0.7.26
+supabase==2.31.0

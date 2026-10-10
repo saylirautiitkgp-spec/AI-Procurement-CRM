@@ -1,0 +1,338 @@
+{
+  "method": "Reproducible selection of the initial 20-company development/evaluation set.\n\nMethod (documented so it can be re-run and audited):\n  1. Read companies (read-only) from Supabase.\n  2. rank(company) = sha256(f\"{SEED}:{company_id}\") - a fixed pseudo-random order that does not\n     depend on names, data quality or enrichment status (no cherry-picking).\n  3. Stratify by sector_id: within each sector sort by rank, then take companies round-robin across\n     sectors (ordered by sector_id) until 20 are chosen.\n  4. Offline \"web variants\" (standard, ambiguous, conflicting, ...) are assigned by position in the\n     final list (index % len(VARIANTS)). This is a TEST DESIGN choice to cover edge cases; it says\n     nothing about the real company.\nThe 20 companies are a development set only: nothing in the runtime depends on them.",
+  "seed": "agentic-eval-v1",
+  "n": 20,
+  "source_rows": 904,
+  "companies": [
+    {
+      "company_id": 101,
+      "name": "Pixxel",
+      "sector": "Aerospace & Defence",
+      "country": "India",
+      "products": [
+        "Satellite Imaging"
+      ],
+      "components": [
+        "Optics",
+        "Sensors"
+      ],
+      "in_duplicate_name_group": true,
+      "web_variant": "standard"
+    },
+    {
+      "company_id": 205,
+      "name": "Unmanned Life",
+      "sector": "Drones (Europe)",
+      "country": "Spain",
+      "products": [
+        "Drones (~Software + UAV integrations",
+        "yr)"
+      ],
+      "components": [
+        "AI processors",
+        "edge computing",
+        "drone hardware"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "ambiguous"
+    },
+    {
+      "company_id": 341,
+      "name": "Triveni Engineering & Industries",
+      "sector": "EPC",
+      "country": "India",
+      "products": [
+        "Sugar",
+        "Water",
+        "Power EPC"
+      ],
+      "components": [
+        "Gearboxes",
+        "Motors",
+        "Pumps"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "no_website"
+    },
+    {
+      "company_id": 414,
+      "name": "Huawei Digital Power India",
+      "sector": "Electricals",
+      "country": "India",
+      "products": [
+        "Solar Inverters",
+        "Energy Storage"
+      ],
+      "components": [
+        "Power Modules",
+        "IGBTs"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "conflicting"
+    },
+    {
+      "company_id": 603,
+      "name": "HP India",
+      "sector": "Electronics",
+      "country": "India",
+      "products": [
+        "Laptops",
+        "PCs",
+        "Printers"
+      ],
+      "components": [
+        "Processors",
+        "Displays",
+        "PCBAs",
+        "Memory",
+        "Plastics"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "no_contacts"
+    },
+    {
+      "company_id": 765,
+      "name": "NTPC REL Manufacturing",
+      "sector": "Solar",
+      "country": "India",
+      "products": [
+        "Solar modules (planned)"
+      ],
+      "components": [
+        "Glass",
+        "cells",
+        "EVA"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "search_quota"
+    },
+    {
+      "company_id": 839,
+      "name": "GE Vernova (Wind)",
+      "sector": "Wind",
+      "country": "India",
+      "products": [
+        "Onshore wind turbines"
+      ],
+      "components": [
+        "Generators",
+        "gearboxes",
+        "electrical systems",
+        "towers"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "search_rate_limit"
+    },
+    {
+      "company_id": 11,
+      "name": "Airbus India",
+      "sector": "Aerospace & Defence",
+      "country": "India",
+      "products": [
+        "Aircraft Engineering"
+      ],
+      "components": [
+        "Composites",
+        "Electronics"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "search_error"
+    },
+    {
+      "company_id": 187,
+      "name": "Robonic Ltd.",
+      "sector": "Drones (Europe)",
+      "country": "Finland",
+      "products": [
+        "Drones (~Launcher systems for UAVs",
+        "yr)"
+      ],
+      "components": [
+        "Pneumatic launchers",
+        "hydraulics",
+        "controls"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "empty_search"
+    },
+    {
+      "company_id": 251,
+      "name": "Gannon Dunkerley",
+      "sector": "EPC",
+      "country": "India",
+      "products": [
+        "Industrial Construction"
+      ],
+      "components": [
+        "Electrical Equipment"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "injection"
+    },
+    {
+      "company_id": 432,
+      "name": "Kirloskar Oil Engines (Alternator Division)",
+      "sector": "Electricals",
+      "country": "India",
+      "products": [
+        "Diesel Generators",
+        "Alternators"
+      ],
+      "components": [
+        "Engines",
+        "Copper",
+        "Steel"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "standard"
+    },
+    {
+      "company_id": 665,
+      "name": "Shogini Technoarts",
+      "sector": "Electronics",
+      "country": "India",
+      "products": [
+        "PCB Assembly",
+        "Electronic Manufacturing"
+      ],
+      "components": [
+        "PCB Laminates",
+        "Semiconductors",
+        "Connectors"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "ambiguous"
+    },
+    {
+      "company_id": 733,
+      "name": "Genus Innovation",
+      "sector": "Solar",
+      "country": "India",
+      "products": [
+        "Solar modules",
+        "smart meters",
+        "inverters"
+      ],
+      "components": [
+        "Cells",
+        "glass",
+        "electronics"
+      ],
+      "in_duplicate_name_group": true,
+      "web_variant": "no_website"
+    },
+    {
+      "company_id": 837,
+      "name": "Fabtech Projects",
+      "sector": "Wind",
+      "country": "India",
+      "products": [
+        "Wind Towers"
+      ],
+      "components": [
+        "Steel Plates"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "conflicting"
+    },
+    {
+      "company_id": 23,
+      "name": "Azista Industries",
+      "sector": "Aerospace & Defence",
+      "country": "India",
+      "products": [
+        "Satellite Systems"
+      ],
+      "components": [
+        "PCBAs",
+        "RF Modules"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "no_contacts"
+    },
+    {
+      "company_id": 160,
+      "name": "Dronamics",
+      "sector": "Drones (Europe)",
+      "country": "Bulgaria",
+      "products": [
+        "Drones (~100–300 cargo drones",
+        "yr)"
+      ],
+      "components": [
+        "Aircraft engines",
+        "avionics",
+        "composites",
+        "satellite communications"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "search_quota"
+    },
+    {
+      "company_id": 332,
+      "name": "Tenova India",
+      "sector": "EPC",
+      "country": "India",
+      "products": [
+        "Steel & Mining EPC"
+      ],
+      "components": [
+        "Automation",
+        "Drives"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "search_rate_limit"
+    },
+    {
+      "company_id": 398,
+      "name": "Genus Electrotech",
+      "sector": "Electricals",
+      "country": "India",
+      "products": [
+        "Smart Meters",
+        "EMS",
+        "PCB Assemblies"
+      ],
+      "components": [
+        "PCBAs",
+        "Displays",
+        "Connectors"
+      ],
+      "in_duplicate_name_group": true,
+      "web_variant": "search_error"
+    },
+    {
+      "company_id": 577,
+      "name": "ECIL (Electronics Corporation of India Ltd.)",
+      "sector": "Electronics",
+      "country": "India",
+      "products": [
+        "Nuclear Electronics",
+        "Defence Electronics",
+        "Communication Systems"
+      ],
+      "components": [
+        "PCBAs",
+        "RF Modules",
+        "Embedded Systems"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "empty_search"
+    },
+    {
+      "company_id": 744,
+      "name": "Indo National Solar",
+      "sector": "Solar",
+      "country": "India",
+      "products": [
+        "Solar lighting & PV products"
+      ],
+      "components": [
+        "Cells",
+        "batteries"
+      ],
+      "in_duplicate_name_group": false,
+      "web_variant": "injection"
+    }
+  ]
+}
