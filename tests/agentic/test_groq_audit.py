@@ -349,3 +349,20 @@ def test_slow_small_quota_providers_can_raise_the_run_budgets_by_configuration()
                            "AGENTIC_TOOL_RESULT_CHARS": "3000"}).limits
     assert (default.max_wall_clock_s, default.max_total_tokens_run) == (180.0, 60_000)
     assert (tuned.max_wall_clock_s, tuned.max_total_tokens_run, tuned.tool_result_chars_for_llm) == (1200.0, 80_000, 3000)
+
+
+def test_reasoning_tokens_finish_reason_and_provider_timing_are_captured_from_real_sdk_types():
+    from groq.types.chat import ChatCompletion
+    comp = ChatCompletion.model_validate({
+        "id": "x", "object": "chat.completion", "created": 1, "model": MODEL,
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "route", "arguments": "{}"}}]}}],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 90, "total_tokens": 590, "total_time": 0.42, "queue_time": 0.01,
+                  "completion_tokens_details": {"reasoning_tokens": 61}}})
+    r = q.parse_response(comp)
+    assert (r.usage.input_tokens, r.usage.output_tokens, r.usage.reasoning_tokens) == (500, 90, 61)
+    assert r.provider_data["groq"]["finish_reason"] == "tool_calls" and r.provider_data["groq"]["provider_total_time_s"] == 0.42
+    llm = gs.CountingLLM(FakeLLM([r]))
+    llm.generate(system="s", messages=[], tools=[], max_output_tokens=10)
+    assert llm.log[0]["reasoning_tokens"] == 61 and llm.log[0]["provider_meta"]["finish_reason"] == "tool_calls"
+    assert q.parse_response(real_completion(content="x")).usage.reasoning_tokens == 0          # absent -> 0, not an error

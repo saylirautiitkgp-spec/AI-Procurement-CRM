@@ -68,9 +68,14 @@ def parse_response(resp: Any) -> LLMResponse:
             calls.append(ToolCallRequest(id=tc.id or f"q{uuid.uuid4().hex[:10]}", name=tc.function.name,
                                          args=args if isinstance(args, dict) else {}))
     u = getattr(resp, "usage", None)
-    return LLMResponse(text=text, tool_calls=calls,
+    details = getattr(u, "completion_tokens_details", None)
+    first = resp.choices[0] if getattr(resp, "choices", None) else None
+    meta = {"finish_reason": getattr(first, "finish_reason", None),
+            "provider_total_time_s": getattr(u, "total_time", None), "provider_queue_time_s": getattr(u, "queue_time", None)}
+    return LLMResponse(text=text, tool_calls=calls, provider_data={"groq": meta},
                        usage=Usage(requests=1, input_tokens=int(getattr(u, "prompt_tokens", 0) or 0),
-                                   output_tokens=int(getattr(u, "completion_tokens", 0) or 0)))
+                                   output_tokens=int(getattr(u, "completion_tokens", 0) or 0),
+                                   reasoning_tokens=int(getattr(details, "reasoning_tokens", 0) or 0)))
 
 
 def map_error(exc: Exception) -> LLMError:

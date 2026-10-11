@@ -89,6 +89,8 @@ class CountingLLM:
             raise
         self.log.append({"request": self.n, "latency_s": round(time.monotonic() - t0, 2),
                          "input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens,
+                         "reasoning_tokens": resp.usage.reasoning_tokens,
+                         "provider_meta": (resp.provider_data or {}).get("groq"),
                          "tool_calls": [c.name for c in resp.tool_calls], "text_chars": len(resp.text),
                          # synthetic inputs only, so the raw model output is safe to keep (still redacted)
                          "raw": {"text": redact(resp.text)[:1500],
@@ -170,6 +172,8 @@ def run_smoke(llm, registry=None) -> dict:
             "all_passed": all(c["ok"] for c in results.values()),
             "total_input_tokens": sum(x.get("input_tokens", 0) for x in llm.log),
             "total_output_tokens": sum(x.get("output_tokens", 0) for x in llm.log),
+            "total_reasoning_tokens": sum(x.get("reasoning_tokens", 0) for x in llm.log),
+            "total_latency_s": round(sum(x.get("latency_s", 0) for x in llm.log), 2),
             "note": "synthetic inputs only; no Tavily, no database; results say nothing about real-page accuracy"}
 
 

@@ -29,6 +29,7 @@ class Usage(BaseModel):
     requests: int = 1
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0        # subset of output_tokens when the provider reports it (0 = not reported)
 
 
 class LLMResponse(BaseModel):
