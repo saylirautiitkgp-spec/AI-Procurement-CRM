@@ -1,5 +1,9 @@
 # Provider comparison plan: Gemini vs Groq
 
+> UPDATE 2026-10-11: Gemini 3 Flash passed the 4-request live smoke test but its free tier (5 RPM / 20 RPD) fits < 1 full run/day.
+> The offline Groq audit, capacity model and approval checklist are in `docs/GROQ_OFFLINE_AUDIT.md`. Sections below are the
+> original plan; the live stages still require separate explicit approval.
+
 **Status: plan only. No live request has been made to either provider. No provider is recommended yet.**
 Gemini (`agentic/llm/gemini.py`) stays the working default. Groq (`agentic/llm/groq.py`) exists for offline
 evaluation only. There is no automatic fallback; the provider is chosen by `AGENTIC_LLM_PROVIDER`.

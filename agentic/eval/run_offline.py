@@ -70,7 +70,8 @@ class RunMetrics:
 
 
 def evaluate_run(company: dict, variant: str, *, specs=None, limits: Limits | None = None, llm=None,
-                 secrets: tuple = (), in_db: bool = True, efficiency=None, big_pages: bool = False) -> tuple[RunMetrics, dict]:
+                 secrets: tuple = (), in_db: bool = True, efficiency=None, big_pages: bool = False,
+                 objective: str | None = None) -> tuple[RunMetrics, dict]:
     specs = specs or AGENT_SPECS
     world = make_world(company, variant, big_pages=big_pages)
     settings = Settings(limits=limits or Limits(), **({"efficiency": efficiency} if efficiency is not None else {}))
@@ -79,7 +80,7 @@ def evaluate_run(company: dict, variant: str, *, specs=None, limits: Limits | No
                      specs=specs, sleep=lambda s: None)
     runner = AgenticRunner(deps, specs)
     t0 = time.perf_counter()
-    out = runner.start(company["name"], OBJECTIVE)
+    out = runner.start(company["name"], objective or OBJECTIVE)
     wall = (time.perf_counter() - t0) * 1000
     rep = out["report"]
     truth = ev.norm_text(" ".join([p["text"] for p in world["pages"].values()]

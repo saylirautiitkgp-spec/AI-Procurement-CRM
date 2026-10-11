@@ -100,6 +100,15 @@ def build_live_service(env: Mapping[str, str] | None = None, factories: Mapping[
                                    "There is no automatic fallback between providers.")
     if settings.provider == "groq" and "llm" not in f and not env.get("AGENTIC_MODEL"):
         raise ServiceNotConfigured("Set AGENTIC_MODEL explicitly for groq (no default model is assumed).")
+    quota = None
+    if env.get("AGENTIC_QUOTA"):
+        from agentic.llm.pacing import ProviderQuota
+        try:
+            quota = ProviderQuota.parse(env["AGENTIC_QUOTA"])
+        except ValueError as exc:
+            raise ServiceNotConfigured(f"AGENTIC_QUOTA invalid: {exc}")
+    if settings.provider == "groq" and quota is None:
+        raise ServiceNotConfigured("Set AGENTIC_QUOTA=rpm=..,tpm=..,rpd=..,tpd=.. from YOUR console (no limits are assumed).")
 
     def default_llm():
         tb = env.get("AGENTIC_THINKING_BUDGET")
@@ -134,6 +143,10 @@ def build_live_service(env: Mapping[str, str] | None = None, factories: Mapping[
         return SupabaseCommitRepo(supabase_client())
 
     llm = f.get("llm", default_llm)()
+    store = Store(settings.db_path)
+    if quota is not None:
+        from agentic.llm.pacing import PacedLLM
+        llm = PacedLLM(llm, quota, store)
     search = f.get("search", default_search)()
     fetcher = f.get("fetcher", default_fetcher)()
     repo = f.get("repo", default_repo)()
@@ -141,7 +154,6 @@ def build_live_service(env: Mapping[str, str] | None = None, factories: Mapping[
     from langgraph.checkpoint.sqlite import SqliteSaver
     os.makedirs(settings.data_dir, exist_ok=True)
     checkpointer = SqliteSaver(sqlite3.connect(settings.checkpoint_path, check_same_thread=False))
-    store = Store(settings.db_path)
     deps = make_deps(llm=llm, repo=repo, search=search, fetcher=fetcher, store=store, settings=settings,
                      specs=AGENT_SPECS, commit_repo=commit)
     return AgenticService(AgenticRunner(deps, AGENT_SPECS, checkpointer=checkpointer), "live", settings)

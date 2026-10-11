@@ -36,6 +36,8 @@ class Store:
         with self._lock, self._conn:
             self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS credit_ledger(month TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS llm_usage(ts REAL, key TEXT, tokens INTEGER);
+            CREATE INDEX IF NOT EXISTS llm_usage_key_ts ON llm_usage(key, ts);
             CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS runs(run_id TEXT PRIMARY KEY, company_name TEXT, objective TEXT,
                 status TEXT, created_at TEXT, updated_at TEXT, tracker TEXT, report TEXT);
@@ -62,6 +64,17 @@ class Store:
                 "ON CONFLICT(month) DO UPDATE SET used = used + excluded.used",
                 (self._month(), n))
         return self.credits_used()
+
+    # ---- LLM usage (rolling-window free-tier budgets) -----------------------
+    def usage_add(self, key: str, tokens: int, ts: float) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("INSERT INTO llm_usage VALUES(?,?,?)", (ts, key, int(tokens)))
+
+    def usage_since(self, key: str, seconds: float, now: float) -> tuple[int, int]:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM llm_usage WHERE key=? AND ts>?",
+                                     (key, now - seconds)).fetchone()
+        return int(row[0]), int(row[1])
 
     # ---- cache -------------------------------------------------------------
     @staticmethod

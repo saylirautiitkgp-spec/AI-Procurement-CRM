@@ -111,16 +111,21 @@ def test_same_harness_runs_unchanged_against_a_groq_shaped_client():
     assert out["requests_made"] == 4 and out["all_passed"], out["checks"]
 
 
-def test_service_selects_groq_only_when_configured_explicitly(tmp_path):
+def test_service_selects_groq_only_with_explicit_model_and_operator_supplied_quota(tmp_path):
     from agentic import service as svc
+    from agentic.llm.pacing import PacedLLM
     from tests.agentic.support import make_runner
     r = make_runner()
-    env = {"AGENTIC_MODE": "live", "AGENTIC_ALLOW_LIVE": "1", "AGENTIC_LLM_PROVIDER": "groq"}
-    built = svc.build_live_service(env=env, factories={"llm": lambda: r.llm, "search": lambda: r.search,
-                                                       "fetcher": lambda: r.fetcher, "repo": lambda: r.deps.repo},
-                                   data_dir=str(tmp_path))
-    assert built.settings.provider == "groq"
-    with pytest.raises(svc.ServiceNotConfigured):
-        svc.build_live_service(env={**env, "AGENTIC_LLM_PROVIDER": "openai"}, data_dir=str(tmp_path))
+    base = {"AGENTIC_MODE": "live", "AGENTIC_ALLOW_LIVE": "1", "AGENTIC_LLM_PROVIDER": "groq"}
+    fac = {"llm": lambda: r.llm, "search": lambda: r.search, "fetcher": lambda: r.fetcher, "repo": lambda: r.deps.repo}
+    quota = "rpm=30,tpm=8000,rpd=1000,tpd=200000"
+    built = svc.build_live_service(env={**base, "AGENTIC_QUOTA": quota}, factories=fac, data_dir=str(tmp_path))
+    assert built.settings.provider == "groq" and isinstance(built.runner.deps.llm.inner, PacedLLM)
+    with pytest.raises(svc.ServiceNotConfigured, match="AGENTIC_QUOTA"):             # no assumed limits
+        svc.build_live_service(env=base, factories=fac, data_dir=str(tmp_path))
+    with pytest.raises(svc.ServiceNotConfigured, match="invalid"):
+        svc.build_live_service(env={**base, "AGENTIC_QUOTA": "rpm=30"}, factories=fac, data_dir=str(tmp_path))
+    with pytest.raises(svc.ServiceNotConfigured):                                    # unknown provider, no fallback
+        svc.build_live_service(env={**base, "AGENTIC_LLM_PROVIDER": "openai", "AGENTIC_QUOTA": quota}, data_dir=str(tmp_path))
     with pytest.raises(svc.ServiceNotConfigured, match="AGENTIC_MODEL"):             # no assumed Groq model
-        svc.build_live_service(env=env, data_dir=str(tmp_path))
+        svc.build_live_service(env={**base, "AGENTIC_QUOTA": quota}, data_dir=str(tmp_path))

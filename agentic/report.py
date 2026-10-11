@@ -14,7 +14,7 @@ from agentic.guards.budget import usage_summary
 from agentic.security import redact_obj
 
 LIMIT_REASONS = {"wall_clock_exceeded", "max_llm_calls_reached", "max_tool_calls_reached",
-                 "max_tokens_reached", "max_supervisor_steps", "llm_quota", "llm_rate_limit",
+                 "max_tokens_reached", "max_supervisor_steps", "llm_quota", "llm_rate_limit", "llm_billing",
                  "supervisor_invalid_routing", "llm_other", "llm_transient", "llm_invalid"}
 
 

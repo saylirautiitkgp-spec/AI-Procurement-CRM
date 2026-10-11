@@ -103,6 +103,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         monthly_credit_budget=_int("AGENTIC_MONTHLY_CREDITS", Limits.monthly_credit_budget),
         max_llm_calls_run=_int("AGENTIC_MAX_LLM_CALLS", Limits.max_llm_calls_run),
         max_tool_calls_run=_int("AGENTIC_MAX_TOOL_CALLS", Limits.max_tool_calls_run),
+        max_wall_clock_s=float(_int("AGENTIC_WALL_CLOCK_S", int(Limits.max_wall_clock_s))),
+        max_total_tokens_run=_int("AGENTIC_MAX_TOKENS", Limits.max_total_tokens_run),
+        tool_result_chars_for_llm=_int("AGENTIC_TOOL_RESULT_CHARS", Limits.tool_result_chars_for_llm),
     )
     return Settings(
         limits=limits,
