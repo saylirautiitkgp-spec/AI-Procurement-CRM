@@ -131,6 +131,9 @@ def map_error(exc: Exception) -> LLMError:
     code = getattr(exc, "code", None)
     msg = redact(str(exc))[:300]
     low = msg.lower()
+    if type(exc).__name__ in ("ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
+                              "APITimeoutError") or isinstance(exc, TimeoutError):
+        return LLMError("transient", "request timed out: " + msg)       # bounded by RetryingLLM like any 5xx
     if code == 429 or "resource_exhausted" in low:
         if "perday" in low.replace(" ", "").replace("_", "") or "per day" in low or "daily" in low:
             return LLMError("quota", msg)
@@ -147,7 +150,7 @@ class GeminiClient:
 
     def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None, client: Any = None,
                  temperature: float | None = None, thinking_budget: int | None = None,
-                 thinking_level: str | None = None):
+                 thinking_level: str | None = None, timeout_s: float | None = None):
         if thinking_budget is not None and thinking_level is not None:
             raise ValueError("thinking_budget and thinking_level cannot be combined (the API returns 400)")
         self.model = model
@@ -155,12 +158,17 @@ class GeminiClient:
         self.temperature = temperature if temperature is not None else (1.0 if model.startswith("gemini-3") else 0.2)
         self.thinking_budget = thinking_budget
         self.thinking_level = thinking_level
+        self.timeout_s = timeout_s
         if client is None:
             from google import genai
+            from google.genai import types
             key = api_key or os.environ.get("GEMINI_API_KEY")
             if not key:
                 raise RuntimeError("GEMINI_API_KEY is not configured")
-            client = genai.Client(api_key=key)
+            # HttpOptions.timeout is in MILLISECONDS. The SDK has no timeout by default and makes no retries
+            # (retry_options=None -> one attempt); retries are bounded elsewhere (RetryingLLM).
+            http_options = types.HttpOptions(timeout=max(1, int(timeout_s * 1000))) if timeout_s else None
+            client = genai.Client(api_key=key, http_options=http_options)
         self._c = client
 
     def generate(self, *, system: str, messages: list[dict], tools: list[ToolSpec], max_output_tokens: int,

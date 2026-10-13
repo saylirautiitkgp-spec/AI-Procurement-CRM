@@ -21,8 +21,7 @@ from agentic.eval.gemini_smoke import CountingLLM, SmokeGuardError
 from agentic.llm.base import LLMResponse
 
 CHARS_PER_TOKEN = 4          # rough English/JSON estimate; replace with provider-reported usage once live
-FABRICATION_REASONS = {"url_not_retrieved_in_this_run", "snippet_not_found_in_document", "value_not_supported_by_snippet",
-                       "email_not_literally_in_snippet", "phone_not_literally_in_snippet"}
+from agentic.eval.quality import FABRICATION_REASONS   # noqa: E402 - shared definition
 
 
 class PromptSizeProbe:

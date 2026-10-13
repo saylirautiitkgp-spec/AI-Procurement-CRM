@@ -1,103 +1,84 @@
-# Agentic procurement-intelligence runtime
+# Agentic procurement-intelligence runtime - architecture, setup, limits
 
-A LangGraph runtime with an LLM-driven supervisor and five tool-calling agents. It sits **next to** the
-legacy code (`agents/`, `services/`, `workflow/`) and does not replace it. Python package: `agentic/`.
+A LangGraph runtime with an LLM-driven supervisor and five tool-calling agents. It sits next to the legacy code
+(`agents/`, `services/`, `workflow/`) and does not replace it. Python package: `agentic/`. Hand-over notes for the next
+engineer/agent: `CLAUDE.md`. Provider choice and evidence: `docs/PROVIDER_DECISION.md`.
 
-## Run the tests (offline, free, no keys)
+## Setup and tests (offline, free, no keys)
 
 ```bash
-python -m venv .venv-agentic
+python -m venv .venv-agentic                    # git-ignored; do NOT install into the git-tracked .venv
 .venv-agentic/Scripts/python -m pip install -r requirements-agentic.txt
-.venv-agentic/Scripts/python -m pytest                       # ~160 tests, ~35 s, no network
-.venv-agentic/Scripts/python -m agentic.eval.run_offline     # offline evaluation of the first-20 set
+.venv-agentic/Scripts/python -m pytest          # ~300 tests, ~2 min, no network
+.venv-agentic/Scripts/python -m agentic.eval.graph_eval      # full-graph evaluation with simulated model mistakes
+.venv-agentic/Scripts/python -m agentic.eval.cost_report     # token/request savings
+.venv-agentic/Scripts/python -m agentic.eval.capacity        # free-tier capacity model
+.venv-agentic/Scripts/python -m uvicorn api.app:app --port 8000   # API (agentic routes answer 503 until configured)
 ```
 
 ## How a run works
 
-```
-intake -> supervisor --(LLM route tool, guarded)--> agent_llm <-> agent_tools --> agent_done -> supervisor
-              |                                                                                  
-              +--> finalize -> [propose -> approval (interrupt) -> commit] -> END
-```
+`intake -> supervisor -> agent_llm <-> agent_tools -> agent_done -> supervisor ... -> finalize -> [propose -> approval -> commit]`
 
-* **intake**: resolves the submitted *name* against Supabase (no ID needed). Result: `found`, `ambiguous`
-  (e.g. the same company listed twice) or `not_found`. A not-found company is researched exactly the same
-  way; the research object lives only in the run.
-* **supervisor**: an LLM chooses the next agent by calling `route`. Python vetoes invalid choices
-  (prerequisites, no-progress, run limits). It may finish early; agents are never run as a fixed pipeline.
-* **agents**: each is a loop. The LLM picks a permitted tool + arguments, the `GuardedExecutor` runs it,
-  the result goes back to the LLM, which decides to search again, fetch, revise, or call its
-  `submit_*_findings` tool. Python enforces call/credit/token/time limits and stops stalled loops.
-* **validation**: every claim must quote a snippet that exists verbatim in a document retrieved *in this
-  run*; values must be supported by the snippet; confidence is computed from evidence, never self-reported.
-* **writes**: agents have no write tools. Verified claims become *proposals*; applying needs a recorded
-  human approval, passes the write gate (allowlisted tables/columns, no deletes, overwrite detection,
-  tamper hash), is idempotent and audited. `merge_all()` is no longer run automatically.
+* **intake** resolves the submitted *name* against Supabase (no ID needed): `found`, `ambiguous`, `not_found`. A company
+  that is not in the database is researched identically; persistence is a separate, approval-gated proposal.
+* **supervisor**: an LLM calls `route`; Python vetoes ineligible choices (identity must be confirmed before
+  contact/procurement/supplier; no re-run without new information). Early `finish` is allowed.
+* **agents** (company, contact, procurement, supplier, lead) are tool-calling loops run through the `GuardedExecutor`
+  (permissions, argument validation, call/credit/token/time limits, repeat detection). They finish by calling their own
+  `submit_*_findings` tool.
+* **evidence validation (never weakened):** every claim must quote a snippet that exists verbatim in a document retrieved
+  in this run; the value must be supported by the snippet; confidence is computed from evidence. Emails/phones only if
+  printed literally.
+* **correction cycle (default ON, bounded):** if a submission has rejected claims, the model gets one correction turn
+  (`Limits.max_submit_attempts = 2`; `AGENTIC_RETRY_PARTIAL=0` disables). Accepted claims and their evidence are kept, no
+  duplicates are created. Costs one extra LLM request per corrected submission.
+* **honest run status:** `completed` only when nothing is unresolved. `partial` carries `status_reasons`:
+  `limit:*`, `search_unavailable:*`, `no_verified_results_and_tool_failures`, `agent_not_finished:*`,
+  `evidence_rejected_all:<agent>`, `evidence_rejected_some:<agent>:<fields>`. A legitimate "searched, found nothing"
+  result stays `completed`. `failed` = technical failure. Rejected claims (agent, field, reasons, unverified value) are
+  listed in `report.gaps.rejected_claims`.
+* **writes:** agents have no write tools. Verified claims become proposals; applying needs a recorded human approval and
+  passes the write gate (allowlists, no deletes, overwrite detection, tamper hash, idempotent, audited).
 
-| Agent | Tools | Output (all evidence-validated) |
-|---|---|---|
-| company | web_search, fetch_page | identity/official site, HQ, industry, products, size, locations |
-| contact | web_search, fetch_page, get_crm_context | named procurement contacts; email/phone only if printed on the page |
-| procurement | web_search, fetch_page, get_crm_context | supplier portal, procurement page, purchasing categories/components |
-| supplier | web_search, fetch_page, get_crm_context | supplier relationships stated in one sentence naming both parties |
-| lead | compute_lead_score | deterministic, explainable score from *verified* data only |
+## Provider configuration (all offline-safe by default)
 
-## Free-tier controls (all in `agentic/config.py`)
+| Variable | Meaning |
+|---|---|
+| `AGENTIC_MODE=live` + `AGENTIC_ALLOW_LIVE=1` | required for live research; otherwise the API answers 503 |
+| `AGENTIC_LLM_PROVIDER` | `gemini` (default in live mode) or `groq`; there is **no automatic fallback** |
+| `AGENTIC_MODEL` | default `gemini-3-flash-preview`; **mandatory** for Groq (approved: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`) |
+| `AGENTIC_QUOTA=rpm=..,tpm=..,rpd=..,tpd=..` | **mandatory for Groq**; your console values; enables client-side pacing + rolling-24h budgets |
+| `AGENTIC_WALL_CLOCK_S`, `AGENTIC_MAX_TOKENS`, `AGENTIC_TOOL_RESULT_CHARS` | raise/lower run budgets for slow, small-quota providers (Groq: 1200 / 80000 / 3000) |
+| `AGENTIC_THINKING_LEVEL` | Gemini 3 thinking level (default `low`) |
+| `AGENTIC_RETRY_PARTIAL=0` | disable the correction cycle for partial rejections |
+| `AGENTIC_API_TOKEN` | protects every endpoint; approvals are disabled without it |
+| `AGENTIC_ENABLE_WRITES=1` | creates the commit repository so approved proposals can be applied |
+| `GEMINI_API_KEY` / `GROQ_API_KEY` | read from the process environment (or `.env` via `--load-dotenv` for the smoke scripts) |
 
-Per run: 10 search credits, 40 LLM calls, 40 tool calls, 60k tokens, 180 s. Monthly: 300 Tavily credits
-(the free plan has 1,000; the legacy pipeline can spend up to 36 per company). Search depth defaults to
-`basic` (1 credit); identical searches are cached for 30 days; one concurrent run; bounded queue.
-Quota/rate-limit errors end the run as **partial** with a recorded reason - no retry storms.
+## Free-tier limits you must plan around (your console values)
 
-## Enabling live runs (needs explicit opt-in)
-
-```
-AGENTIC_MODE=live  AGENTIC_ALLOW_LIVE=1  AGENTIC_LLM_PROVIDER=gemini  AGENTIC_MODEL=gemini-2.5-flash
-AGENTIC_API_TOKEN=<long random>          # required for approvals; protects every endpoint
-AGENTIC_ENABLE_WRITES=1                  # only if you want proposals to be appliable
-```
-Without these the API answers 503. **No live LLM/Tavily call has been made while building this.**
-
-## Verified vs not verified
-
-Verified offline (tests): routing/vetoes, tool loop, evidence validation, limits, SSRF/size/redirect rules,
-secret redaction, approval + resume across restarts (SQLite), write-gate rules, API contracts, Gemini
-request/response conversion against SDK types.
-
-**Not verified (needs approved free-tier calls):** real Gemini tool-calling quality and schema acceptance,
-thinking-token usage under `max_output_tokens`, real Tavily result shapes, real-page extraction accuracy,
-Supabase write path (`SupabaseCommitRepo` is only tested against a fake), RLS/FK-delete behaviour of the
-live database. The offline evaluation uses **synthetic** `.example` pages and a **test-double policy**
-(`PolicyLLM`); it measures the harness, not real-world accuracy or any productivity gain (no baseline exists).
+* Gemini 3 Flash: 5 RPM, 20 RPD, 250k TPM: under one full run per day, about two company-only runs per day.
+* Groq gpt-oss-120b: 30 RPM, 1,000 RPD, 8,000 TPM, 200,000 TPD: about 2 to 3 full runs/day, at least 8 to 10 minutes per
+  full run, tool results must be capped (~3,000 chars) so single requests stay under 8,000 tokens.
+* Tavily free plan: 1,000 credits/month; the runtime spends ~5 per full run (monthly cap 300 by default).
 
 ## Known limitations
 
-* Supabase REST is not transactional: a multi-operation proposal can fail part-way (recorded as `failed`
-  with the operations done). A server-side RPC is the proper fix (additive migration, needs approval).
-* Provenance is stored in `ai_insights` (existing columns) because `company_profile`/`contacts` have no
-  per-field source columns; a dedicated evidence table is a possible additive migration.
-* Merge execution is not implemented; only detection exists. A reviewed dry-run merge plan (FK impact for
-  all 12 tables that reference `companies`) must come first.
-* Lead-score weights are a provisional heuristic and need stakeholder review.
-* Groq is not implemented; there is no provider fallback by design.
+* No real-model research accuracy has been measured; live evidence is two 4-request smoke tests (n=1 each).
+* Offline evaluations use synthetic `.example` pages and a deterministic decision-maker: they test the pipeline, not models.
+* Supabase writes (`SupabaseCommitRepo`) are tested only against a fake; RLS / FK delete rules are unknown (run
+  `agentic.fk_introspect.INTROSPECTION_SQL`). Merge execution does not exist (planner only; `docs/MERGE_EXECUTOR_DESIGN.md`).
+* REST writes are not transactional; provenance is stored in `ai_insights` (existing columns).
+* The Next.js dashboard is unchanged and not wired to the new API; `next build` was not run (it needs Google Fonts over the
+  network); `tsc --noEmit` and ESLint pass.
+* Lead-score weights are a provisional heuristic. Legacy bugs listed in `CLAUDE.md` section 10 remain.
 
-## Dry-run merge planner (read-only)
+## Related documents
 
-```bash
-# offline, from the committed structural snapshot (no database access):
-python -m agentic.merge_plan --snapshot tests/fixtures/duplicate_groups.json data/merge_plan
-# refresh the snapshot from Supabase (SELECT only; contact names are hashed in memory, never stored):
-python -m agentic.merge_sources tests/fixtures/duplicate_groups.json
-```
-Produces `merge_plan.json` + `merge_plan.md`: candidate pairs, category (`likely_duplicate`,
-`same_name_different_sector`, `near_name_match`, `distinct_entities_likely`), evidence and rationale, the Golden
-Record (unchanged legacy `score_company`), field-by-field decisions (legacy `MergeEngine` rule shown), dependent
-rows for all 12 tables that reference `companies`, and the rows the legacy `ForeignKeyService` would lose.
-The planner has no write path; every pair is `ready: false` until a transactional executor exists.
-
-## Gemini smoke test (prepared, NOT run)
-
-`python -m agentic.eval.gemini_smoke --dry-run --model <id>` prints the plan. A live run needs
-`AGENTIC_SMOKE_APPROVED=1`, `GEMINI_API_KEY` in the process environment (`.env` is not read unless `--load-dotenv`),
-`--model <exact id>` and `--i-have-checked-my-free-quota`; at most 4 requests (synthetic inputs, no Tavily, no
-database, no retries, 1024 output tokens each). Token/request savings: see `docs/TOKEN_COST_ANALYSIS.md`.
+`docs/PROVIDER_DECISION.md` (decision + evidence) | `docs/GRAPH_EVAL_REPORT.md` (strict criterion, simulated-mistake matrix) |
+`docs/GROQ_OFFLINE_AUDIT.md` (Groq audit, capacity, console checklist) | `docs/TOKEN_COST_ANALYSIS.md` (efficiency switches) |
+`docs/PROVIDER_COMPARISON_PLAN.md` (original staged plan) | `docs/MERGE_EXECUTOR_DESIGN.md` (design only; nothing applied).
+Dry-run merge planner: `python -m agentic.merge_plan --snapshot tests/fixtures/duplicate_groups.json data/merge_plan`.
+Smoke tests (guarded, need explicit approval): `agentic.eval.gemini_smoke`, `agentic.eval.groq_smoke`; each reports
+`integration_passed` and `evidence_quality_passed` separately.

@@ -86,7 +86,7 @@ def test_supervisor_finishes_when_objective_is_covered_and_does_not_run_all_agen
 
 
 # --------------------------------------------------------------- evidence rules
-def _scripted_company_run(claims, site=None, extra_script=None):
+def _scripted_company_run(claims, site=None, extra_script=None, after_submit=None):
     script = [
         tool_call("route", next="company", reason="need identity"),
         tool_call("web_search", query="Apollo Micro Systems official website"),
@@ -96,6 +96,8 @@ def _scripted_company_run(claims, site=None, extra_script=None):
     ]
     if extra_script:
         script[3:3] = extra_script
+    if after_submit:
+        script[4:4] = after_submit
     llm = FakeLLM(script)
     r = make_runner(llm=llm)
     return r.start("Apollo Micro Systems", OBJECTIVE_PROFILE), llm
@@ -114,8 +116,10 @@ def test_fabricated_url_and_unquoted_snippet_are_rejected():
         {"field": "industry", "value": "mining",             # URL never retrieved
          "evidence": [{"url": "https://made-up.example/x", "snippet": "a leading mining business"}]},
     ]
-    out, _ = _scripted_company_run(claims, site=home)
+    drop_bad = [tool_call("submit_company_findings", status="partial", identity_website=home, claims=claims[:1])]
+    out, _ = _scripted_company_run(claims, site=home, after_submit=drop_bad)       # correction turn: drop unsupported claims
     rep = out["report"]
+    assert out["status"] == "partial" and any(r.startswith("evidence_rejected_some:company") for r in rep["run"]["status_reasons"])
     assert "official_website" in rep["company_profile"]
     assert "headquarters" not in rep["company_profile"] and "industry" not in rep["company_profile"]
     reasons = {r["field"]: r["reasons"] for r in out["rejected"]["company"]}
@@ -128,7 +132,8 @@ def test_value_not_stated_by_the_cited_snippet_is_rejected():
     claims = [{"field": "official_website", "value": home, "evidence": [{"url": home, "snippet": GOOD_HOME}]},
               {"field": "founded_year", "value": "1901",
                "evidence": [{"url": home, "snippet": "employs approximately"}]}]
-    out, _ = _scripted_company_run(claims, site=home)
+    drop_bad = [tool_call("submit_company_findings", status="partial", identity_website=home, claims=claims[:1])]
+    out, _ = _scripted_company_run(claims, site=home, after_submit=drop_bad)
     assert "founded_year" not in (out["report"]["company_profile"] or {})
     assert any("value_not_supported" in x for r in out["rejected"]["company"] for x in r["reasons"])
 

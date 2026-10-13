@@ -39,6 +39,7 @@ class Limits:
     max_output_tokens: int = 1024
     llm_max_retries: int = 2
     llm_backoff_base_s: float = 1.0
+    llm_request_timeout_s: float = 60.0      # per-request cap; see effective_llm_timeout_s() for the wall-clock fit
     # fetch
     fetch_max_bytes: int = 500_000
     fetch_timeout_s: float = 10.0
@@ -48,6 +49,14 @@ class Limits:
     ledger_doc_chars: int = 20_000
     ledger_max_docs: int = 40
     max_concurrent_runs: int = 1
+    max_db_selects_run: int | None = None   # per-run cap on Supabase SELECTs (None = not capped); AGENTIC_MAX_DB_SELECTS
+    max_parallel_agents: int = 3            # worker threads for one parallel stage
+    # Company evidence packet (Efficiency.prefetch): the system pre-fetches the official pages so the model starts
+    # with documents instead of spending turns on discovery. Bounded; every document is also in the ledger.
+    prefetch_max_pages: int = 3             # fetch_page calls the prefetch may make (plus its one search)
+    prefetch_doc_chars: int = 2_500         # page text per document shown to the model
+    prefetch_packet_chars: int = 7_500      # hard cap for the whole packet
+    prefetch_min_chars: int = 300           # less page text than this = packet "insufficient" (fallback)
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,11 @@ class Efficiency:
     compact_schemas: bool = False         # strip validation keywords from tool schemas sent to the model
     ledger_hint: bool = False             # list already-retrieved documents in later agents' tasks
     batch_hint: bool = False              # ask the model to request independent calls in one turn
+    prefetch: bool = False                # Company agent starts from a system-prepared evidence packet (AGENTIC_PREFETCH=1)
+    deterministic_routing: bool = False   # clear single-capability objectives are routed by Python, not the LLM
+    lazy_crm: bool = False                # read only the CRM tables the needed agents use
+    lead_deterministic: bool = False      # routine lead score + standard next actions without an LLM call
+    parallel_agents: bool = False         # independent agents of one stage run concurrently (field-request runs)
 
 
 BASELINE_EFFICIENCY = Efficiency(False, False, False, False, False, False, False, False)
@@ -74,10 +88,14 @@ BASELINE_EFFICIENCY = Efficiency(False, False, False, False, False, False, False
 class Settings:
     limits: Limits = field(default_factory=Limits)
     provider: str = "fake"            # fake | gemini  (groq not implemented yet)
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3-flash-preview"      # the model the live smoke test verified
     allow_live: bool = False
     data_dir: str = "data"
     min_company_match: float = 0.75
+    # Send a submission back for correction when only SOME claims were rejected (not just when all were).
+    # Bounded by Limits.max_submit_attempts (2) and the run budgets; costs one extra LLM request per corrected
+    # submission. Validation rules are untouched. Disable with AGENTIC_RETRY_PARTIAL=0.
+    retry_partial_rejections: bool = True
     efficiency: Efficiency = field(default_factory=Efficiency)
 
     @property
@@ -87,6 +105,25 @@ class Settings:
     @property
     def checkpoint_path(self) -> str:
         return os.path.join(self.data_dir, "checkpoints.sqlite")
+
+
+def effective_llm_timeout_s(limits: "Limits") -> float:
+    """Per-request LLM timeout that fits the wall-clock budget: even if every allowed attempt (1 + retries) hits
+    the timeout, the total stays within max_wall_clock_s. Never below 5 s. Retry counts are not changed here."""
+    fit = limits.max_wall_clock_s / (max(0, limits.llm_max_retries) + 1)
+    return max(5.0, min(limits.llm_request_timeout_s, fit))
+
+
+def _hybrid_efficiency(env: Mapping[str, str]) -> Efficiency:
+    """AGENTIC_HYBRID=1 turns on the hybrid pieces together; each can be set individually (1/0) and wins over it."""
+    hybrid = env.get("AGENTIC_HYBRID", "0") == "1"
+
+    def flag(name: str) -> bool:
+        v = env.get(name)
+        return (v == "1") if v in ("0", "1") else hybrid
+    return Efficiency(prefetch=flag("AGENTIC_PREFETCH"), deterministic_routing=flag("AGENTIC_DETERMINISTIC_ROUTING"),
+                      lazy_crm=flag("AGENTIC_LAZY_CRM"), lead_deterministic=flag("AGENTIC_LEAD_DETERMINISTIC"),
+                      parallel_agents=flag("AGENTIC_PARALLEL"))
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -106,11 +143,17 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         max_wall_clock_s=float(_int("AGENTIC_WALL_CLOCK_S", int(Limits.max_wall_clock_s))),
         max_total_tokens_run=_int("AGENTIC_MAX_TOKENS", Limits.max_total_tokens_run),
         tool_result_chars_for_llm=_int("AGENTIC_TOOL_RESULT_CHARS", Limits.tool_result_chars_for_llm),
+        max_db_selects_run=(_int("AGENTIC_MAX_DB_SELECTS", 0) or None),
+        llm_max_retries=max(0, _int("AGENTIC_LLM_RETRIES", Limits.llm_max_retries)),
+        llm_request_timeout_s=float(max(5, _int("AGENTIC_LLM_TIMEOUT_S", int(Limits.llm_request_timeout_s)))),
     )
+    live = env.get("AGENTIC_MODE") == "live"
     return Settings(
         limits=limits,
-        provider=env.get("AGENTIC_LLM_PROVIDER", "fake"),
-        model=env.get("AGENTIC_MODEL", "gemini-2.5-flash"),
+        provider=env.get("AGENTIC_LLM_PROVIDER") or ("gemini" if live else "fake"),     # Gemini is the default live provider
+        model=env.get("AGENTIC_MODEL") or "gemini-3-flash-preview",
+        retry_partial_rejections=env.get("AGENTIC_RETRY_PARTIAL", "1") != "0",
         allow_live=env.get("AGENTIC_ALLOW_LIVE", "0") == "1",
         data_dir=env.get("AGENTIC_DATA_DIR", "data"),
+        efficiency=_hybrid_efficiency(env),
     )

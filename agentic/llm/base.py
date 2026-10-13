@@ -7,6 +7,7 @@ between providers.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable, Protocol
 
@@ -69,8 +70,13 @@ class RetryingLLM:
         self.base_delay = base_delay
         self._sleep = sleep
         self.retries = 0
+        self._lock = threading.Lock()      # parallel agents share one client: requests go out one at a time
 
     def generate(self, **kwargs) -> LLMResponse:
+        with self._lock:
+            return self._generate(**kwargs)
+
+    def _generate(self, **kwargs) -> LLMResponse:
         attempt = 0
         while True:
             try:

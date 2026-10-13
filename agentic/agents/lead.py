@@ -33,6 +33,39 @@ def process_lead(state: dict, findings: dict, deps) -> ProcessResult:
     return res
 
 
+_STANDARD_ACTIONS = (          # (substring of a missing_information item, action) - fixed, reviewable wording
+    ("confirmed official website", "Run Company Intelligence to confirm the official website and organisation identity."),
+    ("unverified profile fields", "Verify the remaining company profile fields from first-party pages ({detail})."),
+    ("procurement page / supplier portal", "Run Procurement Intelligence to find the supplier-registration portal or procurement page."),
+    ("procurement decision-maker", "Run Contact Intelligence to find publicly documented procurement decision-makers."),
+    ("verification of crm-listed components", "Verify the CRM-listed components against public procurement pages."),
+    ("components purchased", "Identify the components or categories the company says it buys (Procurement Intelligence)."),
+)
+
+
+def standard_next_actions(score: dict) -> list[str]:
+    """Routine follow-ups derived from the deterministic score's missing information. No LLM involved."""
+    out: list[str] = []
+    for item in score.get("missing_information", []):
+        low = item.lower()
+        for key, action in _STANDARD_ACTIONS:
+            if key in low:
+                detail = item.split(":", 1)[1].strip() if ":" in item else ""
+                out.append(action.format(detail=detail[:120])[:200])
+                break
+    if not out and score.get("band") in ("high", "medium"):
+        out.append("Review the evidence links behind each factor before contacting the company.")
+    return out[:6]
+
+
+def lead_deterministic_findings(state: dict) -> dict:
+    """The routine Lead result: authoritative score (via process_lead) + standard actions, no model call."""
+    score = score_lead(state)
+    return {"status": "partial" if score["missing_information"] else "satisfied",
+            "next_actions": standard_next_actions(score), "unresolved": score["missing_information"][:20],
+            "notes": "Computed deterministically; no model call.", "suggest_next": []}
+
+
 def lead_task(state: dict) -> str:
     s = state["subject"]
     head = f"Company: {s['name']}\nUser objective: {state['objective']}\n"
@@ -57,8 +90,10 @@ def lead_tools(agents: frozenset) -> list[Tool]:
 LEAD_AGENT = AgentSpec(
     name="lead", title="Lead Intelligence & Prioritization Agent",
     goal="Produce an explainable lead-priority assessment from verified information only.",
-    role_prompt=("Do not browse. Use compute_lead_score, then summarise what is missing and what to do next. "
+    role_prompt=("Do not browse and do not call any tool that is not offered in this request. The deterministic score "
+                 "is either in your task text or obtained with compute_lead_score when that tool is offered. Then "
+                 "summarise what is missing and what to do next, and finish with submit_lead_findings. "
                  "Never state a priority that contradicts the computed band."),
     findings_model=LeadFindings, finish_tool="submit_lead_findings",
     tool_names=("compute_lead_score", "submit_lead_findings"),
-    process=process_lead, task=lead_task)
+    process=process_lead, task=lead_task, deterministic=lead_deterministic_findings)

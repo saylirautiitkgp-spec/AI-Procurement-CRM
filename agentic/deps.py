@@ -3,6 +3,7 @@ client; tests inject fakes, live runs inject real adapters."""
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -24,6 +25,9 @@ class Deps:
     commit_repo: Any = None         # CommitRepository (only used by the commit node)
     settings: Settings = field(default_factory=Settings)
     sleep: Callable[[float], None] = time.sleep
+    # one search at a time: identical concurrent queries can never be paid for twice (the second hits the cache)
+    search_lock: Any = field(default_factory=threading.RLock)
+    schema: Any = None              # SchemaContract: which columns are confirmed (gates change-set proposals)
 
     @property
     def limits(self) -> Limits:

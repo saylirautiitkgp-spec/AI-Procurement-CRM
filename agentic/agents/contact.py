@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from agentic import evidence as ev
 from agentic.agents.common import AgentSpec, BaseFindings, EvidenceRefModel, ProcessResult, validate_refs
+from agentic.prefetch import agent_prefetch
 
 ROLE_WORDS = ("procure", "purchas", "sourcing", "supply chain", "buyer", "vendor", "materials management",
               "supplier")
@@ -115,5 +116,6 @@ CONTACT_AGENT = AgentSpec(
                  "phone numbers; include them only when printed in the snippet you cite. Quote the line that contains "
                  "BOTH the person's name and their title."),
     findings_model=ContactFindings, finish_tool="submit_contact_findings",
+    prefetch=agent_prefetch("contact"),
     tool_names=("web_search", "fetch_page", "get_crm_context", "submit_contact_findings"),
     process=process_contact, task=contact_task)

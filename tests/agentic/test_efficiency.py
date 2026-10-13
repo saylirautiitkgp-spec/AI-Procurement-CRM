@@ -83,6 +83,8 @@ def test_evidence_validation_uses_the_full_ledger_not_the_compacted_prompt_and_p
               tool_call("submit_company_findings", status="satisfied", identity_website=home, claims=[
                   {"field": "official_website", "value": home, "evidence": [{"url": home, "snippet": line}]},
                   {"field": "headquarters", "value": "Atlantis", "evidence": [{"url": home, "snippet": "headquartered in Atlantis"}]}]),
+              tool_call("submit_company_findings", status="partial", identity_website=home, claims=[
+                  {"field": "official_website", "value": home, "evidence": [{"url": home, "snippet": line}]}]),   # correction turn: drop it
               tool_call("route", next="finish", reason="done")]
     out = make_runner(llm=FakeLLM(script), settings=settings(ALL_ON)).start("Apollo Micro Systems", "company profile")
     errs = [e["data"]["error"]["code"] for e in out["trace"] if e["type"] == "tool_result" and not e["data"]["ok"]]

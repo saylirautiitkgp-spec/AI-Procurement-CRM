@@ -49,7 +49,11 @@ class GuardedExecutor:
         return self.deps.limits
 
     def execute(self, *, agent: str, call: ToolCallRequest, budgets: dict,
-                ledger: dict, subject: dict, claims: dict | None = None) -> ExecResult:
+                ledger: dict, subject: dict, claims: dict | None = None,
+                offered: frozenset | None = None) -> ExecResult:
+        """`offered` = names of the tools declared in the LLM request that produced this call. A call to anything
+        else is rejected before execution (providers reject undeclared tools; this makes the contract ours too).
+        None = system-issued call (e.g. prefetch), no contract to check."""
         started = time.monotonic()
         tool = self.registry.get(call.name)
         if tool is None:
@@ -58,6 +62,14 @@ class GuardedExecutor:
         if agent not in tool.agents:
             return self._count(budgets, _err(call.name, "tool_not_permitted",
                                              f"Tool '{call.name}' is not permitted for this agent."), started)
+        # Offered-tool contract: checked before arguments are even parsed. When the run/agent limit is already hit,
+        # the limit errors below stay authoritative (a wrap-up turn must still end the agent through them).
+        if (offered is not None and call.name not in offered and (
+                tool.kind == "finish" or (bud.run_limit_reason(self.limits, budgets) is None
+                                          and bud.agent_limit_reason(self.limits, budgets) is None))):
+            return self._count(budgets, _err(call.name, "tool_not_offered",
+                                             f"Tool '{call.name}' was not offered in this request; offered: "
+                                             f"{sorted(offered)}. Call one of those."), started)
         try:
             args = tool.args_model.model_validate(call.args)
         except ValidationError as exc:

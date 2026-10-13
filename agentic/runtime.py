@@ -77,13 +77,37 @@ class AgenticRunner:
         return {"configurable": {"thread_id": run_id}, "recursion_limit": 500}
 
     def start(self, company_name: str, objective: str | None = None, run_id: str | None = None,
-              propose_changes: bool = False) -> dict:
+              propose_changes: bool = False, fields: list | None = None, refresh: bool = False,
+              expected_company_id: int | None = None) -> dict:
+        """`fields` = exactly which data to retrieve (names or aliases from agentic/fields.py). Only the agents those
+        fields need are run. `refresh` re-verifies company fields the CRM already holds; without it they are skipped."""
+        from agentic import fields as fl
+        keys, unknown = fl.resolve_fields(fields)
+        if unknown:
+            raise ValueError("unknown_fields: " + ", ".join(unknown))
         run_id = run_id or uuid.uuid4().hex[:12]
-        objective = objective or DEFAULT_OBJECTIVE
+        objective = objective or (("Retrieve" + (" and refresh" if refresh else "") + ": " +
+                                   ", ".join(fl.BY_KEY[k].label for k in keys)) if keys else DEFAULT_OBJECTIVE)
         self.deps.store.upsert_run(run_id, company_name=company_name, objective=objective, status="queued")
-        state = initial_state(run_id, company_name, objective,
-                              {"propose_changes": propose_changes, "efficiency": asdict(self.deps.settings.efficiency)})
-        result = self.graph.invoke(state, self.config(run_id))
+        options = {"propose_changes": propose_changes, "efficiency": asdict(self.deps.settings.efficiency)}
+        if keys:
+            options.update(fields=keys, refresh=bool(refresh))
+        if expected_company_id is not None:
+            options["expected_company_id"] = int(expected_company_id)
+        state = initial_state(run_id, company_name, objective, options)
+        from agentic.guards import select_budget as sb
+        limit = self.deps.limits.max_db_selects_run
+        token = sb.activate(sb.SelectBudget(limit) if limit else None)    # ONE budget for the whole run, all agents/branches
+        try:
+            result = self.graph.invoke(state, self.config(run_id))
+        except sb.SelectBudgetExceeded as exc:        # last resort: a path that did not handle it itself
+            self.deps.store.upsert_run(run_id, status="failed", tracker={
+                "run_id": run_id, "company_submitted": company_name, "status": "failed",
+                "errors": [{"stage": "db_select_budget", "error": f"limit_{exc.limit}"}],
+                "stop_reason": "db_select_budget_exceeded"})
+            raise RuntimeError("db_select_budget_exceeded") from None
+        finally:
+            sb.deactivate(token)
         self._save(result)
         return result
 
@@ -102,14 +126,28 @@ class AgenticRunner:
     def service(self) -> ProposalService:
         if self.deps.commit_repo is None:
             raise RuntimeError("no commit repository configured")
-        return ProposalService(self.deps.store, self.deps.commit_repo)
+        return ProposalService(self.deps.store, self.deps.commit_repo, schema=getattr(self.deps, "schema", None))
 
     def propose_for_run(self, run_id: str) -> list[dict]:
         st = self.state(run_id)
         if st is None:
             raise KeyError(run_id)
         svc = self.service()
+        if (st.get("options") or {}).get("fields"):        # a field request goes through its reviewed change set
+            return self.propose_from_change_set(run_id)["proposals"]
         return [svc.summary(p) for p in svc.propose(st)]
+
+    def propose_from_change_set(self, run_id: str, item_ids: list | None = None) -> dict:
+        """Reviewed change-set items -> pending proposals. Reads the CRM (drift check, contact comparison); writes
+        nothing. Needs a commit repository to exist, i.e. AGENTIC_ENABLE_WRITES=1 - approval and apply stay gated."""
+        st = self.state(run_id)
+        if st is None:
+            raise KeyError(run_id)
+        svc = self.service()
+        res = svc.propose_from_change_set(st, (st.get("report") or {}).get("change_set"), item_ids)
+        return {**{k: v for k, v in res.items() if k != "proposals"},
+                "proposals": [{**svc.summary(p), "items": p.get("items", []), "schema_unconfirmed": p.get("schema_unconfirmed", []),
+                               "origin": p.get("origin"), "evidence": p.get("evidence", [])} for p in res["proposals"]]}
 
     def _save(self, result: dict) -> None:
         if result.get("report") is not None:

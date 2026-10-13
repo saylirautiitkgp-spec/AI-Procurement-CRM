@@ -443,7 +443,13 @@ def main(argv: list[str]) -> None:  # pragma: no cover - READ-ONLY report genera
     else:
         from agentic.merge_sources import SupabaseMergeSource
         source = SupabaseMergeSource.from_env()
-    plan = MergePlanner(source).build()
+    fk_info = None
+    if "--introspection" in args:           # delete rules etc. from the saved INTROSPECTION_SQL output (read-only file)
+        from agentic import fk_introspect
+        k = args.index("--introspection")
+        fk_info = fk_introspect.analyze(json.load(open(args[k + 1], encoding="utf-8")))
+        args = args[:k] + args[k + 2:]
+    plan = MergePlanner(source, fk_info=fk_info).build()
     jp, mp = write_report(plan, args[0] if args else "data/merge_plan")
     print(json.dumps(plan["summary"], indent=2))
     print("wrote", jp, mp, "- nothing was merged or deleted")

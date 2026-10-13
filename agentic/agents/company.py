@@ -15,6 +15,7 @@ from agentic import gaps as gp
 from agentic import names
 from agentic.agents.common import (AgentSpec, BaseFindings, EvidenceRefModel, FieldClaim,
                                    ProcessResult, validate_refs)
+from agentic.prefetch import run_company_prefetch
 
 COMPANY_CLAIM_FIELDS = {"official_website", "headquarters", "industry", "business_overview",
                         "products_services", "employee_count", "annual_revenue", "founded_year",
@@ -128,6 +129,10 @@ def company_task(state: dict) -> str:
     db_ctx = {k: fields.get(k) for k in ("country", "sector_name", "website", "revenue",
                                           "number_of_plants", "company_type") if fields.get(k) not in (None, "")}
     gaps = [g for g in gp.company_gaps(s, state["claims"]) if g["status"] != "verified"]
+    if (state.get("options") or {}).get("fields"):         # field request: only the fields the user asked for
+        from agentic import fields as fl
+        focus = set(fl.focus_company_fields(state))
+        gaps = [g for g in gaps if g["field"] in focus]
     lines = [
         f"Company submitted by the user: {s['name']!r}",
         f"User objective: {state['objective']}",
@@ -165,4 +170,5 @@ COMPANY_AGENT = AgentSpec(
     tool_names=("web_search", "fetch_page", "submit_company_findings"),
     process=process_company,
     task=company_task,
+    prefetch=run_company_prefetch,      # only used when Efficiency.prefetch is on
 )

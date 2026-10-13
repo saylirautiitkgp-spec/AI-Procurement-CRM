@@ -58,8 +58,14 @@ class ProcessResult:
         lines = [f"Accepted {len(self.accepted)} item(s); rejected {len(self.rejected)}:"]
         for r in self.rejected[:8]:
             lines.append(f"- {r.get('kind') or r.get('field')}: {', '.join(r['reasons'])}")
-        lines.append("Fix rejected items by quoting a snippet that exists verbatim on a page you retrieved, "
-                     "or drop them.")
+        hints = {r for x in self.rejected for r in x["reasons"]}
+        if "snippet_not_found_in_document" in hints:
+            lines.append("A snippet must be copied word-for-word from the page text; a URL, a paraphrase or a summary is not a quote.")
+        if "url_not_retrieved_in_this_run" in hints:
+            lines.append("Cite only URLs that appear in your search/fetch results.")
+        if "value_not_supported_by_snippet" in hints:
+            lines.append("The claimed value must be stated in the snippet you quote.")
+        lines.append("Re-submit only the corrected items (accepted ones are kept), or drop what you cannot support.")
         return "\n".join(lines)
 
 
@@ -74,6 +80,8 @@ class AgentSpec:
     tool_names: tuple[str, ...]
     process: Callable[[dict, dict, Any], ProcessResult]          # (state, findings, deps) -> result
     task: Callable[[dict], str]                                    # state -> task text
+    prefetch: Callable[..., Any] | None = None                     # optional system-prepared evidence (agentic/prefetch.py)
+    deterministic: Callable[[dict], dict] | None = None            # optional LLM-free findings (routine cases only)
 
 
 SAFETY_PREAMBLE = """\

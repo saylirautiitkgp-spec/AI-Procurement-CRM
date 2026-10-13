@@ -62,5 +62,8 @@ def credits_remaining_run(limits: Limits, b: dict) -> int:
 
 
 def usage_summary(b: dict) -> dict:
-    return {k: b[k] for k in ("llm_calls", "tool_calls", "search_credits",
-                              "input_tokens", "output_tokens", "llm_retries")}
+    out = {k: b[k] for k in ("llm_calls", "tool_calls", "search_credits",
+                             "input_tokens", "output_tokens", "llm_retries")}
+    if b.get("db_selects") is not None:
+        out["db_selects"] = b["db_selects"]
+    return out

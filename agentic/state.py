@@ -19,6 +19,7 @@ class RunState(TypedDict, total=False):
     objective: str
     options: dict
     status: str                                   # see RUN_STATUSES
+    status_reasons: list                          # why a run is partial (empty = clean completed)
     subject: dict                                 # run-scoped research object (no DB id required)
     ledger: dict                                  # doc_id -> retrieved document
     claims: dict                                  # agent -> [validated claim]
@@ -38,6 +39,7 @@ class RunState(TypedDict, total=False):
     proposals: list
     approvals: list
     report: dict | None
+    parallel_agents: list                         # agents of the current stage running in parallel
     trace: Annotated[list, operator.add]
 
 
@@ -48,7 +50,7 @@ def initial_state(run_id: str, company_name: str, objective: str, options: dict 
         agent_results={}, agent_runs={}, completed_agents=[], current_agent=None,
         agent_objective="", agent_messages=[], agent_notes={}, budgets=new_budgets(),
         route_history=[], supervisor_steps=0, stop_reason=None, errors=[], proposals=[],
-        approvals=[], report=None, trace=[],
+        approvals=[], report=None, parallel_agents=[], trace=[],
     )
 
 

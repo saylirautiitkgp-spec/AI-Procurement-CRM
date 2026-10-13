@@ -219,3 +219,51 @@ def test_existing_application_still_imports_and_exposes_both_route_sets():
     app_mod = importlib.import_module("api.app")
     paths = set(app_mod.app.openapi()["paths"])
     assert "/dashboard" in paths and "/agentic/runs" in paths and "/agentic/usage" in paths
+
+
+def test_gemini_quota_guard_is_in_the_live_path_and_writes_stay_off(tmp_path):
+    from agentic.llm.base import LLMError
+    from agentic.llm.pacing import PacedLLM, ProviderQuota
+    runner = make_runner()
+    env = {"AGENTIC_MODE": "live", "AGENTIC_ALLOW_LIVE": "1", "AGENTIC_LLM_PROVIDER": "gemini",
+           "AGENTIC_QUOTA": "rpm=5,tpm=250000,rpd=20", "AGENTIC_ENABLE_WRITES": "0"}
+    f = {"llm": lambda: runner.llm, "search": lambda: runner.search, "fetcher": lambda: runner.fetcher,
+         "repo": lambda: runner.deps.repo, "commit": lambda: InMemoryCommitRepo()}
+    built = svc_mod.build_live_service(env=env, factories=f, data_dir=str(tmp_path))
+    paced = built.runner.deps.llm.inner                      # RetryingLLM -> PacedLLM -> client
+    assert isinstance(paced, PacedLLM) and paced.quota.rpd == 20 and paced.log is built.runner.deps.store
+    assert built.runner.deps.commit_repo is None
+    for _ in range(16):                                       # 80% planning cap of 20 requests/day
+        built.runner.deps.store.usage_add(paced._key, 100, paced._clock())
+    with pytest.raises(LLMError) as exc:
+        paced.generate(system="s", messages=[], tools=[], max_output_tokens=10)
+    assert exc.value.kind == "quota"
+    assert paced.local_refusals == 1
+    with pytest.raises(ValueError):                           # Groq must still declare all four limits
+        ProviderQuota.parse("rpm=30,tpm=8000,rpd=1000")
+
+
+def test_llm_retries_env_defaults_to_two_and_zero_means_no_retry_attempts():
+    from agentic.config import load_settings
+    from agentic.llm.base import LLMError
+    from agentic.runtime import make_deps
+    from agentic.persistence.store import Store
+    assert load_settings({}).limits.llm_max_retries == 2
+    assert load_settings({"AGENTIC_LLM_RETRIES": "junk"}).limits.llm_max_retries == 2
+    assert load_settings({"AGENTIC_LLM_RETRIES": "-3"}).limits.llm_max_retries == 0
+
+    class Flaky:
+        name, model, calls = "flaky", "m", 0
+
+        def generate(self, **kw):
+            Flaky.calls += 1
+            raise LLMError("rate_limit", "429")
+
+    for retries, expected_calls in (("0", 1), ("2", 3)):
+        Flaky.calls = 0
+        settings = load_settings({"AGENTIC_LLM_RETRIES": retries})
+        deps = make_deps(llm=Flaky(), repo=None, search=None, fetcher=None, store=Store(":memory:"),
+                         settings=settings, specs={}, sleep=lambda s: None)
+        with pytest.raises(LLMError):
+            deps.llm.generate(system="s", messages=[], tools=[], max_output_tokens=1)
+        assert Flaky.calls == expected_calls and deps.llm.retries == expected_calls - 1

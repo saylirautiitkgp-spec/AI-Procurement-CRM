@@ -12,6 +12,9 @@ from datetime import datetime
 from database.supabase_client import supabase
 
 
+import os
+
+
 class DatabaseService:
 
     def __init__(self):
@@ -284,6 +287,15 @@ class DatabaseService:
     column,
     value
     ):
+
+        # Every table that references companies has ON DELETE CASCADE (schema_introspection.json, 2026-10-12): deleting
+        # a company silently deletes its contacts, products, components, supplier links, lead status, insights and
+        # profile. Legacy merge code reaches this method. It is blocked unless an operator opts in explicitly.
+        if os.environ.get("LEGACY_DELETES_ENABLED") != "1":
+            raise PermissionError(
+                "legacy delete blocked: set LEGACY_DELETES_ENABLED=1 only after a reviewed merge plan "
+                "(see docs/MERGE_EXECUTOR_DESIGN.md); company deletes cascade to 12 tables"
+            )
 
         (
         self.db

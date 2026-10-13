@@ -71,10 +71,11 @@ class RunMetrics:
 
 def evaluate_run(company: dict, variant: str, *, specs=None, limits: Limits | None = None, llm=None,
                  secrets: tuple = (), in_db: bool = True, efficiency=None, big_pages: bool = False,
-                 objective: str | None = None) -> tuple[RunMetrics, dict]:
+                 objective: str | None = None, retry_partial: bool | None = None) -> tuple[RunMetrics, dict]:
     specs = specs or AGENT_SPECS
     world = make_world(company, variant, big_pages=big_pages)
-    settings = Settings(limits=limits or Limits(), **({"efficiency": efficiency} if efficiency is not None else {}))
+    extra = {} if retry_partial is None else {"retry_partial_rejections": retry_partial}
+    settings = Settings(limits=limits or Limits(), **extra, **({"efficiency": efficiency} if efficiency is not None else {}))
     deps = make_deps(llm=llm or PolicyLLM(), repo=repo_for(company) if in_db else InMemoryRepo([]), search=FixtureSearch(world),
                      fetcher=FixtureFetcher(world), store=Store(":memory:"), settings=settings,
                      specs=specs, sleep=lambda s: None)

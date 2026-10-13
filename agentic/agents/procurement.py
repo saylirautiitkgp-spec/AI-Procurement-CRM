@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from agentic import evidence as ev
 from agentic.agents.common import AgentSpec, BaseFindings, EvidenceRefModel, ProcessResult, validate_refs
+from agentic.prefetch import agent_prefetch
 
 URL_KINDS = ("supplier_portal", "procurement_page")
 TEXT_KINDS = ("purchasing_category", "purchased_component", "process_note")
@@ -83,5 +84,6 @@ PROCUREMENT_AGENT = AgentSpec(
                  "corroborate with public sources. For URL kinds the URL must be a page you retrieved or one quoted "
                  "in your snippet."),
     findings_model=ProcurementFindings, finish_tool="submit_procurement_findings",
+    prefetch=agent_prefetch("procurement"),
     tool_names=("web_search", "fetch_page", "get_crm_context", "submit_procurement_findings"),
     process=process_procurement, task=procurement_task)

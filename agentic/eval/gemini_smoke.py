@@ -38,6 +38,7 @@ from agentic import evidence as ev
 from agentic.agents import AGENT_SPECS
 from agentic.agents.common import system_prompt
 from agentic.agents.company import CompanyFindings, process_company
+from agentic.eval.quality import strict_assessment
 from agentic.eval.synthetic import make_world
 from agentic.llm.base import LLMError, LLMResponse
 from agentic.runtime import build_registry
@@ -45,6 +46,9 @@ from agentic.security import redact, wrap_untrusted
 from agentic.supervisor import ROUTE_TOOL, SUPERVISOR_SYSTEM
 
 MAX_REQUESTS = 4
+INTEGRATION_CHECKS = ("route_schema_accepted_and_call_parsed", "supervisor_chose_the_only_eligible_agent",
+                      "agent_called_a_tool", "first_tool_is_a_search", "agent_continues_after_observing_results",
+                      "submit_call_returned", "submit_args_validate_against_schema")
 MAX_OUTPUT_TOKENS = 1024     # headroom: thinking tokens count against this cap on Gemini 3
 COMPANY = {"name": "Acme Precision Works", "country": "India", "sector": "electronics",
            "products": ["Control systems", "Relays"], "components": ["PCBAs"]}
@@ -105,6 +109,7 @@ def run_smoke(llm, registry=None) -> dict:
     world = make_world(COMPANY, "standard")
     f = world["facts"]
     results: dict = {}
+    strict = None
 
     def check(name, ok, detail=""):
         results[name] = {"ok": bool(ok), "detail": detail}
@@ -164,12 +169,20 @@ def run_smoke(llm, registry=None) -> dict:
                                                                   "identity": {"verified": False}}}
             pr = process_company(state, findings, None)
             total = len(pr.accepted) + len(pr.rejected)
+            strict = strict_assessment(findings, pr)
             check("quoted_snippets_pass_evidence_validation", total > 0 and len(pr.accepted) >= 1,
                   f"accepted {len(pr.accepted)}/{total}; rejected reasons: {[r['reasons'] for r in pr.rejected][:4]}")
         except Exception as exc:  # noqa: BLE001
             check("submit_args_validate_against_schema", False, redact(str(exc))[:300])
+    integration = all(c["ok"] for n, c in results.items() if n in INTEGRATION_CHECKS)
+    evidence_ok = bool(strict and strict["strict_passed"])
     return {"requests_made": llm.n, "checks": results, "per_request": llm.log,
-            "all_passed": all(c["ok"] for c in results.values()),
+            # (1) PROTOCOL / INTEGRATION: schemas accepted, calls parsed, right tool order, args valid
+            "integration_passed": integration,
+            # (2) EVIDENCE QUALITY: every claim accepted by the evidence validator, no unquoted/fabricated evidence
+            "evidence_quality_passed": evidence_ok,
+            "strict": strict, "strict_passed": integration and evidence_ok,
+            "all_passed": all(c["ok"] for c in results.values()),     # LEGACY name: integration + '>= 1 claim accepted'
             "total_input_tokens": sum(x.get("input_tokens", 0) for x in llm.log),
             "total_output_tokens": sum(x.get("output_tokens", 0) for x in llm.log),
             "total_reasoning_tokens": sum(x.get("reasoning_tokens", 0) for x in llm.log),
@@ -199,7 +212,7 @@ def main(argv: list[str]) -> None:  # pragma: no cover - live
     path = next((a for a in argv if a.endswith(".json")), "data/gemini_smoke_result.json")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     json.dump(out, open(path, "w", encoding="utf-8"), indent=2)
-    print(json.dumps({k: out.get(k) for k in ("requests_made", "all_passed", "aborted")}, indent=2), "->", path)
+    print(json.dumps({k: out.get(k) for k in ("model", "requests_made", "integration_passed", "evidence_quality_passed", "aborted")}, indent=2), "->", path)
 
 
 if __name__ == "__main__":  # pragma: no cover

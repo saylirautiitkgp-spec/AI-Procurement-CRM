@@ -13,9 +13,10 @@ from agentic.evidence import now_iso
 from agentic.guards.budget import usage_summary
 from agentic.security import redact_obj
 
-LIMIT_REASONS = {"wall_clock_exceeded", "max_llm_calls_reached", "max_tool_calls_reached",
+LIMIT_REASONS = {"db_select_budget_exceeded", "wall_clock_exceeded", "max_llm_calls_reached", "max_tool_calls_reached",
                  "max_tokens_reached", "max_supervisor_steps", "llm_quota", "llm_rate_limit", "llm_billing",
-                 "supervisor_invalid_routing", "llm_other", "llm_transient", "llm_invalid"}
+                 "supervisor_invalid_routing", "llm_other", "llm_transient", "llm_invalid",
+                 "planned_agent_blocked"}
 
 
 def _ev(e: dict) -> dict:
@@ -44,20 +45,52 @@ def failed_tool_calls(trace: list[dict]) -> list[dict]:
     return out
 
 
+def _rkey(agent: str, item: dict) -> str:
+    """Identity of a claim for 'was this rejection later resolved?' (field/kind, or the person/supplier for lists)."""
+    if agent in ("contact", "supplier"):
+        return str(item.get("value", "")).lower()
+    return str(item.get("field") or item.get("kind") or "")
+
+
+def status_reasons(state: dict) -> list[str]:
+    """Machine-readable reasons a run is not a clean success. Empty list = clean `completed`.
+
+    Distinguishes (a) evidence-validation problems (the model's claims were rejected), (b) hard limits / outages and
+    (c) tool failures from (d) a legitimate empty result (agent searched, found nothing, submitted no claims) which is
+    NOT a reason: 'not found' is a valid finding."""
+    reasons: list[str] = []
+    if state.get("stop_reason") in LIMIT_REASONS:
+        reasons.append(f"limit:{state['stop_reason']}")
+    b = state.get("budgets", {})
+    if b.get("search_disabled"):
+        reasons.append(f"search_unavailable:{b.get('search_disabled_reason')}")
+    accepted_total = sum(len(v) for v in state.get("claims", {}).values() if isinstance(v, list))
+    if accepted_total == 0 and failed_tool_calls(state.get("trace", [])):
+        reasons.append("no_verified_results_and_tool_failures")      # may be an outage, not a true "not found"
+    results = state.get("agent_results", {})
+    for name, r in results.items():
+        if r.get("end_reason") not in (None, "submitted"):
+            reasons.append(f"agent_not_finished:{name}:{r.get('end_reason')}")
+        if r.get("rejected", 0) and not r.get("accepted", 0):
+            reasons.append(f"evidence_rejected_all:{name}")
+    for name, items in state.get("rejected", {}).items():
+        if not items or f"evidence_rejected_all:{name}" in reasons:
+            continue
+        accepted_keys = {_rkey(name, c) for c in state.get("claims", {}).get(name, []) if isinstance(c, dict)}
+        residual = sorted({_rkey(name, x) for x in items} - accepted_keys)
+        if residual:
+            reasons.append(f"evidence_rejected_some:{name}:{','.join(residual)[:120]}")
+    return reasons
+
+
 def run_status(state: dict) -> str:
     if state.get("status") == "failed":
         return "failed"
-    results = state.get("agent_results", {})
-    if not results:
+    if not state.get("agent_results"):
+        if state.get("stop_reason") == "nothing_to_research":
+            return "completed"
         return "failed" if state.get("errors") else "partial"
-    if state.get("stop_reason") in LIMIT_REASONS or state["budgets"].get("search_disabled"):
-        return "partial"
-    accepted = sum(len(v) for v in state.get("claims", {}).values() if isinstance(v, list))
-    if accepted == 0 and failed_tool_calls(state.get("trace", [])):
-        return "partial"        # nothing verified AND tool failures: the gap may be an outage, not a true "not found"
-    if any(r.get("end_reason") not in ("submitted",) for r in results.values()):
-        return "partial"
-    return "completed"
+    return "partial" if status_reasons(state) else "completed"
 
 
 def coverage_limitations(state: dict) -> list[str]:
@@ -79,6 +112,7 @@ def build_report(state: dict) -> dict:
     s = state["subject"]
     claims = state["claims"]
     status = run_status(state)
+    reasons = status_reasons(state) + ([] if state.get("agent_results") else ["no_agent_completed"])
     ident = s.get("identity") or {"verified": False}
     match = s.get("match") or {"status": "not_run", "matches": [], "assumptions": []}
 
@@ -99,6 +133,7 @@ def build_report(state: dict) -> dict:
             "provenance": "database_unverified",
             "note": "Values stored in the CRM database without source evidence. Not verified by this run.",
             "company_id": ex.get("company_id"),
+            "sections_loaded": ex.get("loaded_sections"),     # lazy CRM: only these were read for this run
             "fields": {k: v for k, v in ex.get("fields", {}).items() if v not in (None, "")},
             "products": ex.get("products", []), "components": ex.get("components", []),
             "contact_summary": ex.get("contact_summary"),
@@ -166,7 +201,8 @@ def build_report(state: dict) -> dict:
 
     return {
         "run": {"run_id": state["run_id"], "company_submitted": s["name"], "objective": state["objective"],
-                "status": status, "stop_reason": state.get("stop_reason"), "generated_at": now_iso()},
+                "status": status, "status_reasons": reasons, "stop_reason": state.get("stop_reason"),
+                "generated_at": now_iso()},
         "summary": " ".join(summary),
         "database_match": {"status": match["status"], "matches": match["matches"],
                            "assumptions": match.get("assumptions", [])},
@@ -184,6 +220,9 @@ def build_report(state: dict) -> dict:
         "gaps": {"company_fields": gaps, "other_areas": gp.other_agent_gaps(s, claims, state["agent_results"]),
                  "unresolved": unresolved, "conflicts": conflicts,
                  "claims_rejected_by_validation": rejected_summary,
+                 "rejected_claims": [{"agent": a, "field": x.get("field") or x.get("kind"), "reasons": x["reasons"],
+                                      "value_unverified": str(x.get("value"))[:100]}
+                                     for a, items in state.get("rejected", {}).items() for x in items][:30],
                  "failed_tool_calls": failed_tool_calls(state.get("trace", []))},
         "coverage_limitations": coverage_limitations(state),
         "agents": {n: {k: r.get(k) for k in ("status", "end_reason", "accepted", "rejected", "notes",
@@ -224,6 +263,7 @@ def build_tracker(state: dict) -> dict:
         "gaps": gp.company_gaps(s, state.get("claims", {})) if s.get("match") else [],
         "errors": state.get("errors", []), "stop_reason": state.get("stop_reason"),
         "database_change": _change_status(state.get("proposals", [])),
+        "status_reasons": state.get("status_reasons", []),
         "updated_at": now_iso(),
     }
     return redact_obj(tracker, max_str=300)

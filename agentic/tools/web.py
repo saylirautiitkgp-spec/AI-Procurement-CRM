@@ -51,30 +51,31 @@ def search_cost(args: WebSearchArgs) -> int:
 def web_search(ctx: ToolContext, args: WebSearchArgs) -> ToolOutput:
     d = ctx.deps
     key = _search_key(d.store, args)
-    results = d.store.cache_get(key, SEARCH_TTL_DAYS)
-    cached = results is not None
-    credits = 0
-    if not cached:
-        if ctx.search_disabled:
-            raise ToolError("search_disabled", "Search is disabled for the rest of this run.")
-        attempt = 0
-        while True:
-            try:
-                resp = d.search.search(" ".join(args.query.split()), args.depth, args.max_results)
-                break
-            except SearchQuotaExceeded:
-                raise ToolError("search_quota_exhausted",
-                                "Search provider quota exhausted; no more searches this run.")
-            except SearchRateLimited as exc:
-                attempt += 1
-                if attempt > 2:
-                    raise ToolError("search_rate_limited_persistent", "Search rate limited repeatedly.")
-                d.sleep(min(exc.retry_after or 2.0 * attempt, 20.0))
-            except SearchFailure as exc:
-                raise ToolError("search_failed", f"Search failed: {exc}", retryable=True)
-        results = resp.results
-        credits = resp.credits
-        d.store.cache_put(key, results)
+    with d.search_lock:       # parallel agents: a repeated query is answered from the cache, never paid for twice
+        results = d.store.cache_get(key, SEARCH_TTL_DAYS)
+        cached = results is not None
+        credits = 0
+        if not cached:
+            if ctx.search_disabled:
+                raise ToolError("search_disabled", "Search is disabled for the rest of this run.")
+            attempt = 0
+            while True:
+                try:
+                    resp = d.search.search(" ".join(args.query.split()), args.depth, args.max_results)
+                    break
+                except SearchQuotaExceeded:
+                    raise ToolError("search_quota_exhausted",
+                                    "Search provider quota exhausted; no more searches this run.")
+                except SearchRateLimited as exc:
+                    attempt += 1
+                    if attempt > 2:
+                        raise ToolError("search_rate_limited_persistent", "Search rate limited repeatedly.")
+                    d.sleep(min(exc.retry_after or 2.0 * attempt, 20.0))
+                except SearchFailure as exc:
+                    raise ToolError("search_failed", f"Search failed: {exc}", retryable=True)
+            results = resp.results
+            credits = resp.credits
+            d.store.cache_put(key, results)
     docs = [{"url": r["url"], "text": r.get("content", ""), "title": r.get("title", "")}
             for r in results if r.get("url")]
     data = {

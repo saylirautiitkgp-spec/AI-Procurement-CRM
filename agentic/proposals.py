@@ -14,8 +14,11 @@ import json
 from typing import Any
 
 from agentic import evidence as ev
+from agentic import names
 from agentic import write_gate as wg
+from agentic.claimid import claim_key
 from agentic.persistence.store import Store
+from agentic.schema_contract import SchemaContract, operation_columns
 
 COMPANY_MAP = {"official_website": "website", "linkedin_url": "linkedin_url"}
 PROFILE_MAP = {"headquarters": "headquarters", "industry": "industry", "business_overview": "company_summary",
@@ -62,7 +65,7 @@ def _insight_ops(company_ref, chosen: dict, agent: str) -> tuple[list[dict], lis
     return ops, evidence
 
 
-def company_proposals(state: dict, commit_repo) -> list[dict]:
+def company_proposals(state: dict, commit_repo, derived: bool = True) -> list[dict]:
     url_claims = [c for c in state["claims"].get("procurement", [])
                   if c.get("field") in ("supplier_portal", "procurement_page")]
     chosen, conflicts = best_claims(state["claims"].get("company", []) + url_claims)
@@ -85,7 +88,7 @@ def company_proposals(state: dict, commit_repo) -> list[dict]:
     comp_fields = {COMPANY_MAP[f]: c["value"] for f, c in chosen.items() if f in COMPANY_MAP}
     prof_fields = {PROFILE_MAP[f]: c["value"] for f, c in chosen.items() if f in PROFILE_MAP}
     ident = subj.get("identity") or {}
-    if ident.get("verified") and ident.get("domain"):
+    if derived and ident.get("verified") and ident.get("domain"):      # reviewed change sets never add unreviewed columns
         prof_fields["website_domain"] = ident["domain"]
     ref = cid if cid is not None else NEW_COMPANY
     required, kind = [], "update_company_fields"
@@ -108,14 +111,32 @@ def company_proposals(state: dict, commit_repo) -> list[dict]:
     insight_ops, evidence = _insight_ops(ref, chosen, "agentic-company")
     ops.extend(insight_ops)
     return [{"kind": kind, "operations": ops, "evidence": evidence, "required_input": required,
+             "claim_keys": [claim_key(c.get("agent") or "company", c) for c in chosen.values()],
              "conflicts_not_proposed": conflicts,
              "summary": (f"{'Create company' if cid is None else 'Update company ' + str(cid)} "
                          f"'{subj['name']}' with {len(chosen)} verified field(s): {', '.join(sorted(chosen))}")}]
 
 
-def _blocked(kind: str, summary: str, evidence: list[dict]) -> dict:
+def _blocked(kind: str, summary: str, evidence: list[dict], reason: str | None = None, claim_keys: list | None = None) -> dict:
     return {"kind": kind, "operations": [], "evidence": evidence, "required_input": [], "summary": summary,
-            "blocked": "company_not_in_database: create the company record (and approve it) first"}
+            "claim_keys": claim_keys or [],
+            "blocked": reason or "company_not_in_database: create the company record (and approve it) first"}
+
+
+def match_existing_contact(commit_repo, company_id, name: str) -> tuple[dict | None, float]:
+    """The CRM contact of this company that `name` most plausibly is, with a similarity score (>= 0.8 only)."""
+    exact = commit_repo.find_one("contacts", company_id=company_id, contact_name=name)
+    if exact:
+        return exact, 1.0
+    lister = getattr(commit_repo, "list_rows", None)
+    if lister is None:
+        return None, 0.0
+    best, score = None, 0.0
+    for row in lister("contacts", company_id=company_id):
+        s = names.person_similarity(name, row.get("contact_name") or "")
+        if s > score:
+            best, score = row, s
+    return (best, score) if score >= 0.8 else (None, score)
 
 
 def contact_proposals(state: dict, commit_repo) -> list[dict]:
@@ -128,10 +149,20 @@ def contact_proposals(state: dict, commit_repo) -> list[dict]:
             continue
         e = c["evidence"][0]
         now = ev.now_iso()
+        ckey = [claim_key(c.get("agent") or "contact", c)]
         if cid is None:
-            out.append(_blocked("insert_contact", f"Add contact '{c['name']}' ({c['designation']})", c["evidence"]))
+            out.append(_blocked("insert_contact", f"Add contact '{c['name']}' ({c['designation']})", c["evidence"],
+                                claim_keys=ckey))
             continue
-        found = commit_repo.find_one("contacts", company_id=cid, contact_name=c["name"])
+        found, score = match_existing_contact(commit_repo, cid, c["name"])
+        if found and score < 0.95:                          # looks like someone already in the CRM: a human decides
+            out.append(_blocked("possible_duplicate_contact",
+                                f"'{c['name']}' resembles CRM contact #{found.get('contact_id')} "
+                                f"'{found.get('contact_name')}' (similarity {score:.2f}); not inserted",
+                                c["evidence"], reason=f"possible_duplicate_of_contact_{found.get('contact_id')}: "
+                                                      "resolve manually (confirm same person or add separately)",
+                                claim_keys=ckey))
+            continue
         if found:
             if found.get("source_url"):
                 continue                                   # already has provenance
@@ -140,7 +171,7 @@ def contact_proposals(state: dict, commit_repo) -> list[dict]:
                 fields["designation"] = c["designation"]   # may be flagged as an overwrite
             op = {"table": "contacts", "op": "update", "key": {"contact_id": found["contact_id"]}, "fields": fields}
             out.append({"kind": "verify_existing_contact", "operations": [op], "evidence": c["evidence"],
-                        "required_input": [],
+                        "required_input": [], "claim_keys": ckey,
                         "summary": f"Attach public source to existing CRM contact '{c['name']}'"})
             continue
         fields = {"company_id": cid, "contact_name": c["name"], "designation": c["designation"],
@@ -152,7 +183,7 @@ def contact_proposals(state: dict, commit_repo) -> list[dict]:
         if c.get("profile_url") and ev.registrable_domain(c["profile_url"]) == "linkedin.com":
             fields["linkedin"] = c["profile_url"]
         out.append({"kind": "insert_contact", "operations": [{"table": "contacts", "op": "insert", "fields": fields}],
-                    "evidence": c["evidence"], "required_input": [],
+                    "evidence": c["evidence"], "required_input": [], "claim_keys": ckey,
                     "summary": f"Add publicly documented contact '{c['name']}' ({c['designation']})"})
     return out
 
@@ -165,8 +196,10 @@ def supplier_proposals(state: dict, commit_repo) -> list[dict]:
         if c.get("status") != "verified":
             continue
         label = f"{c['supplier']} -> {c['customer']}" + (f" ({c['component']})" if c.get("component") else "")
+        skey = [claim_key(c.get("agent") or "supplier", c)]
         if cid is None:
-            out.append(_blocked("insert_supplier_relationship", f"Add supplier relationship {label}", c["evidence"]))
+            out.append(_blocked("insert_supplier_relationship", f"Add supplier relationship {label}", c["evidence"],
+                                claim_keys=skey))
             continue
         e = c["evidence"][0]
         ops = [
@@ -183,7 +216,34 @@ def supplier_proposals(state: dict, commit_repo) -> list[dict]:
                 "generated_by": "agentic-supplier", "source_url": e["url"], "source_type": "web", "status": "Active"}},
         ]
         out.append({"kind": "insert_supplier_relationship", "operations": ops, "evidence": c["evidence"],
-                    "required_input": [], "summary": f"Add evidenced supplier relationship {label}"})
+                    "required_input": [], "claim_keys": skey, "summary": f"Add evidenced supplier relationship {label}"})
+    return out
+
+
+def procurement_insight_proposals(state: dict, commit_repo) -> list[dict]:
+    """Purchasing categories / purchased components / process notes: stored ONLY as sourced ai_insights rows
+    (no existing column holds them); an identical insight already in the CRM is not proposed again."""
+    cid = (state["subject"].get("existing") or {}).get("company_id")
+    out = []
+    for c in state["claims"].get("procurement", []):
+        if c.get("status") != "verified" or c.get("field") in ("supplier_portal", "procurement_page"):
+            continue
+        e = c["evidence"][0]
+        title = f"{c['kind']}: {c['value']}"[:200]
+        ckey = [claim_key(c.get("agent") or "procurement", c)]
+        if cid is None:
+            out.append(_blocked("insert_procurement_insight", f"Add procurement insight {title}", c["evidence"],
+                                claim_keys=ckey))
+            continue
+        if commit_repo.find_one("ai_insights", company_id=cid, insight_title=title):
+            continue
+        out.append({"kind": "insert_procurement_insight", "evidence": c["evidence"], "required_input": [],
+                    "claim_keys": ckey, "summary": f"Record sourced procurement insight '{title}'",
+                    "operations": [{"table": "ai_insights", "op": "insert", "fields": {
+                        "company_id": cid, "insight_type": f"Procurement: {c['kind']}", "insight_title": title,
+                        "insight": f"{e['snippet']} (source: {e['url']})"[:3900], "confidence_score": c["confidence"],
+                        "generated_by": "agentic-procurement", "source_url": e["url"], "source_type": "web",
+                        "status": "Active"}}]})
     return out
 
 
@@ -191,9 +251,10 @@ BUILDERS = [company_proposals, contact_proposals, supplier_proposals]
 
 
 class ProposalService:
-    def __init__(self, store: Store, commit_repo):
+    def __init__(self, store: Store, commit_repo, schema: SchemaContract | None = None):
         self.store = store
         self.commit = commit_repo
+        self.schema = schema            # when set, change-set proposals need CONFIRMED columns (agentic/schema_contract.py)
 
     # ------------------------------------------------------------------ propose
     def propose(self, state: dict) -> list[dict]:
@@ -211,7 +272,7 @@ class ProposalService:
                         "operations": [], "evidence": p.get("evidence", []), "required_input": [],
                         "overwrites": [], "conflicts_not_proposed": [], "status": "blocked",
                         "validation": {"ok": False, "errors": [p["blocked"]], "warnings": []},
-                        "idempotency_key": key, "content_hash": key}
+                        "idempotency_key": key, "content_hash": key, **p.get("extras", {})}
             self.store.add_proposal(proposal["proposal_id"], run_id, proposal, proposal["validation"], key, "blocked")
             return proposal
         errors, warnings, overwrites = [], [], []
@@ -235,7 +296,10 @@ class ProposalService:
                     "operations": ops, "evidence": p["evidence"], "required_input": p["required_input"],
                     "overwrites": sorted(set(overwrites)), "conflicts_not_proposed": p.get("conflicts_not_proposed", []),
                     "status": status, "validation": {"ok": not errors, "errors": errors, "warnings": warnings},
-                    "idempotency_key": key, "content_hash": _hash(content)}
+                    "idempotency_key": key, "content_hash": _hash(content), **p.get("extras", {})}
+        if proposal.get("origin") == "change_set" and self.schema is not None:
+            proposal["schema_unconfirmed"] = self.schema.unconfirmed(operation_columns(ops))
+            proposal["schema_fingerprint"] = self.schema.fingerprint        # the schema evidence this was judged against
         created = self.store.add_proposal(proposal["proposal_id"], run_id, proposal, proposal["validation"],
                                           key, status)
         if not created:
@@ -256,6 +320,81 @@ class ProposalService:
                 "summary": p["summary"], "overwrites": p.get("overwrites", []),
                 "required_input": p.get("required_input", []), "errors": (p.get("validation") or {}).get("errors", [])}
 
+    def _schema_gate(self, change: dict) -> dict | None:
+        """Change-set proposals may only touch columns confirmed to exist (live read or introspection output)."""
+        if change.get("origin") != "change_set" or self.schema is None:
+            return None
+        ops = change.get("operations", [])
+        missing = self.schema.unconfirmed(operation_columns(ops))
+        if missing:
+            return {"ok": False, "error": "schema_unconfirmed", "columns": missing,
+                    "how_to_confirm": "run agentic.fk_introspect.INTROSPECTION_SQL in the Supabase SQL editor, save the "
+                                      "JSON and set AGENTIC_SCHEMA_FILE to it"}
+        later = [f"companies.{x}" for x in change.get("required_input", [])]      # e.g. sector_id, chosen by the approver
+        required = self.schema.missing_required(ops, provided_later=later)
+        if required:
+            return {"ok": False, "error": "required_columns_missing", "columns": required,
+                    "how_to_confirm": "the database declares these columns NOT NULL; the insert does not supply them"}
+        return None
+
+    # --------------------------------------------------------- reviewed change set -> proposals
+    def propose_from_change_set(self, state: dict, change_set: dict, item_ids: list | None = None) -> dict:
+        """Turn REVIEWED change-set items into validated, pending proposals (no write happens here).
+
+        * only items needing approval, only the selected ones, only claims those items were built from;
+        * an item whose reviewed old value no longer matches the live CRM row is STALE and is not proposed;
+        * contacts are compared with the company's existing CRM contacts (fuzzy), probable duplicates are blocked;
+        * every proposal carries its items (old/proposed values, sources, confidence, validation) and the same
+          overwrite protection and evidence re-validation as any other proposal; approval and apply stay human-gated."""
+        if not change_set or change_set.get("writes_performed") is not False:
+            raise ValueError("invalid_change_set")
+        existing = state["subject"].get("existing") or {}
+        if change_set.get("company_id") != existing.get("company_id"):
+            raise ValueError("change_set_company_mismatch")
+        run_id = state["run_id"]
+        reviewable = [i for i in change_set["items"] if i.get("requires_approval")]
+        if item_ids is not None:
+            unknown = sorted(set(item_ids) - {i["id"] for i in reviewable})
+            if unknown:
+                raise ValueError("unknown_item_ids: " + ", ".join(unknown))
+            reviewable = [i for i in reviewable if i["id"] in set(item_ids)]
+        cid = existing.get("company_id")
+        stale, usable = [], []
+        for it in reviewable:
+            table, _, col = (it.get("target") or "").partition(".")
+            if cid is not None and it["entity"] == "company" and table in ("companies", "company_profile") and col:
+                live = (self.commit.get_row(table, {"company_id": cid}) or {}).get(col)
+                if json.dumps(live, sort_keys=True, default=str).lower() != \
+                        json.dumps(it.get("old_value"), sort_keys=True, default=str).lower() and \
+                        not (live in (None, "", [], {}) and it.get("old_value") in (None, "", [], {})):
+                    stale.append({"id": it["id"], "field": it["field"], "reviewed_old_value": it.get("old_value"),
+                                  "live_value": live, "reason": "crm_value_changed_since_review"})
+                    continue
+            usable.append(it)
+        keys = {i["claim_key"] for i in usable}
+        filtered = copy.deepcopy(state)
+        for agent in ("company", "procurement", "contact", "supplier"):
+            filtered["claims"][agent] = [c for c in state["claims"].get(agent, [])
+                                         if isinstance(c, dict) and claim_key(c.get("agent") or agent, c) in keys]
+        out = []
+        for build in (lambda s, c: company_proposals(s, c, derived=False), contact_proposals, supplier_proposals,
+                      procurement_insight_proposals):
+            for p in build(filtered, self.commit):
+                mine = [{k: it.get(k) for k in ("id", "field", "label", "target", "action", "old_value",
+                                                "proposed_value", "confidence", "validation_status", "source_urls",
+                                                "overwrite", "legacy_values")}
+                        for it in usable if it["claim_key"] in set(p.get("claim_keys", []))]
+                p["extras"] = {"origin": "change_set", "change_set_hash": change_set.get("change_set_hash"),
+                               "items": mine}
+                out.append(self._finalize(run_id, p, state["ledger"]))
+        covered = {i["id"] for p in out for i in p.get("items", [])}
+        self.store.audit("proposed_from_change_set", run_id=run_id, details={
+            "change_set_hash": change_set.get("change_set_hash"), "selected": [i["id"] for i in reviewable],
+            "stale": [s["id"] for s in stale], "proposals": [p["proposal_id"] for p in out]})
+        return {"proposals": out, "stale_items": stale,
+                "not_proposed": [i["id"] for i in usable if i["id"] not in covered],
+                "change_set_hash": change_set.get("change_set_hash")}
+
     # ------------------------------------------------------------------- decide
     def decide(self, proposal_id: str, approve: bool, *, by: str, reason: str = "",
                approved_overwrite: bool = False, overrides: dict | None = None) -> dict:
@@ -272,6 +411,9 @@ class ProposalService:
             self.store.audit("rejected", run_id=row["run_id"], proposal_id=proposal_id, actor=by,
                              details={"reason": reason})
             return {"ok": True, "status": "rejected"}
+        gate = self._schema_gate(change)
+        if gate:
+            return gate
         if change["overwrites"] and not approved_overwrite:
             return {"ok": False, "error": "overwrite_requires_explicit_approval",
                     "overwrites": change["overwrites"]}
@@ -302,6 +444,9 @@ class ProposalService:
             return {"ok": False, "error": f"not_approved:{row['status']}"}
         change = row["change"]
         decision = change.get("decision") or {}
+        gate = self._schema_gate(change)
+        if gate:
+            return self._fail(row, gate["error"] + ":" + ",".join(gate["columns"]))
         if _hash({"kind": change["kind"], "operations": change["operations"]}) != change["idempotency_key"]:
             return self._fail(row, "content_changed_since_validation")
         ops = copy.deepcopy(change["operations"])

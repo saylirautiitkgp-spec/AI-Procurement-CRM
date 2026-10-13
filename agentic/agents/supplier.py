@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from agentic import evidence as ev
 from agentic import names
 from agentic.agents.common import AgentSpec, BaseFindings, EvidenceRefModel, ProcessResult, validate_refs
+from agentic.prefetch import agent_prefetch
 
 RELATION_CUES = re.compile(r"(?i)\b(supplies|supplied|supplier|suppliers|supply|vendor|awarded|contract|"
                            r"order for|partner(?:ed)? with|(?:sourced|sources|procures|buys|purchases)\b[^.\n]*\bfrom)\b")
@@ -124,5 +125,6 @@ SUPPLIER_AGENT = AgentSpec(
                  "annual reports and the company's own pages. Quote the single sentence that names both parties and "
                  "the relationship. If no explicit statement exists, report none."),
     findings_model=SupplierFindings, finish_tool="submit_supplier_findings",
+    prefetch=agent_prefetch("supplier"),
     tool_names=("web_search", "fetch_page", "get_crm_context", "submit_supplier_findings"),
     process=process_supplier, task=supplier_task)

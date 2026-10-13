@@ -21,6 +21,7 @@ PRIMARY_KEYS = {"companies": "company_id", "company_profile": "profile_id", "con
 class CommitRepository(Protocol):
     def get_row(self, table: str, key: dict) -> dict | None: ...
     def find_one(self, table: str, **eq: Any) -> dict | None: ...
+    def list_rows(self, table: str, **eq: Any) -> list[dict]: ...
     def insert(self, table: str, row: dict) -> dict: ...
     def update(self, table: str, key: dict, fields: dict) -> None: ...
     def sector_ids(self) -> set[int]: ...
@@ -44,6 +45,9 @@ class InMemoryCommitRepo:
 
     def find_one(self, table, **eq):
         return self.get_row(table, eq)
+
+    def list_rows(self, table, **eq):
+        return [dict(r) for r in self.tables.get(table, []) if self._match(r, eq)]
 
     def insert(self, table, row):
         self._guard(table, "insert")
@@ -89,6 +93,13 @@ class SupabaseCommitRepo:
 
     def find_one(self, table, **eq):
         return self.get_row(table, eq)
+
+    def list_rows(self, table, **eq):
+        """Read-only SELECT (bounded) used to compare proposals with what the CRM already holds."""
+        q = self._c.table(table).select("*")
+        for k, v in eq.items():
+            q = q.eq(k, v)
+        return q.limit(500).execute().data or []
 
     def insert(self, table, row):
         self._check(table, "insert")

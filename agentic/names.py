@@ -56,3 +56,26 @@ def match_type(score: float) -> str:
     if score >= 0.75:
         return "possible"
     return "weak"
+
+
+_TITLES = {"mr", "mrs", "ms", "miss", "dr", "shri", "smt", "sri", "prof", "er", "ca", "cs"}
+
+
+def person_tokens(name: str) -> list[str]:
+    name = unicodedata.normalize("NFKC", name or "").lower()
+    return [t for t in re.sub(r"[^a-z0-9 ]+", " ", name).split() if t not in _TITLES]
+
+
+def person_similarity(a: str, b: str) -> float:
+    """1.0 same tokens (any order/case/title); 0.9 same surname with a matching first name or initial
+    ('K. Bhatt' ~ 'Karan Bhatt'); otherwise a string ratio capped below 0.89."""
+    ta, tb = person_tokens(a), person_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    if sorted(ta) == sorted(tb):
+        return 1.0
+    if ta[-1] == tb[-1] and len(ta) > 1 and len(tb) > 1:
+        fa, fb = ta[0], tb[0]
+        if fa == fb or (len(fa) == 1 and fb.startswith(fa)) or (len(fb) == 1 and fa.startswith(fb)):
+            return 0.9
+    return min(0.89, round(SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio(), 4))

@@ -83,7 +83,7 @@ def main(argv: list[str]) -> None:  # pragma: no cover - live, user-approved onl
     path = next((a for a in argv if a.endswith(".json")), "data/groq_smoke.json")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     json.dump(out, open(path, "w", encoding="utf-8"), indent=2)
-    print(json.dumps({k: out.get(k) for k in ("model", "requests_made", "all_passed", "aborted")}, indent=2), "->", path)
+    print(json.dumps({k: out.get(k) for k in ("model", "requests_made", "integration_passed", "evidence_quality_passed", "aborted")}, indent=2), "->", path)
 
 
 if __name__ == "__main__":  # pragma: no cover

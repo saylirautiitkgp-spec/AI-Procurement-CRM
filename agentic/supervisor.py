@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from agentic import gaps as gp
+from agentic import routing
 from agentic.agents.common import ALL_AGENTS
 from agentic.guards import budget as bud
 from agentic.guards.budget import BudgetStop
@@ -166,6 +167,13 @@ def decide(state: dict, deps, specs: dict, emitter: Emitter) -> tuple[dict, dict
     if eff.get("skip_forced_finish") and not any(e["eligible"] for e in elig.values()):
         return {"next": "finish", "reason": "no agent is eligible - finish is forced (decided without an LLM call)",
                 "vetoes": [], "error": None, "deterministic": True}, elig
+    if (state.get("options") or {}).get("fields"):          # explicit field request: Python plans from the catalog
+        return routing.route_for_fields(state, elig, parallel=bool(eff.get("parallel_agents")),
+                                        max_parallel=limits.max_parallel_agents), elig
+    if eff.get("deterministic_routing"):
+        plan = routing.classify_objective(state["objective"])
+        if plan.kind == "clear":                       # clear single-capability objective: Python plans, no LLM call
+            return routing.route_deterministic(state, elig, plan), elig
     messages = [{"role": "user", "content": _summary(state, elig, limits)}]
     vetoes: list[str] = []
     for attempt in range(2):

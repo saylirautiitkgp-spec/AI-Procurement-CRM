@@ -61,6 +61,11 @@ class RunRequest(BaseModel):
     company_name: str = Field(min_length=2, max_length=200)
     objective: str | None = Field(default=None, max_length=500)
     propose_changes: bool = False
+    fields: list[str] | None = Field(default=None, max_length=30,
+                                     description="Exactly which fields to retrieve (see GET /agentic/fields).")
+    refresh: bool = Field(default=False, description="Re-verify company fields the CRM already holds.")
+    expected_company_id: int | None = Field(default=None, ge=1, description=(
+        "Pin the run to ONE existing CRM record. The run fails instead of researching or proposing a different/new company."))
 
 
 class Decision(BaseModel):
@@ -87,12 +92,75 @@ def start_run(req: RunRequest):
     from agentic.service import QueueFull
     svc = service()
     try:
-        run_id = svc.submit(req.company_name, req.objective, req.propose_changes)
-    except ValueError:
+        run_id = svc.submit(req.company_name, req.objective, req.propose_changes, req.fields, req.refresh,
+                            req.expected_company_id)
+    except ValueError as exc:
+        if str(exc).startswith("unknown_fields"):
+            raise HTTPException(422, detail=str(exc))
         raise HTTPException(422, detail="invalid company name")
     except QueueFull:
         raise HTTPException(429, detail="too many runs queued; try again shortly")
     return {"run_id": run_id, "status": "queued", "mode": svc.mode}
+
+
+@router.get("/fields", dependencies=[Depends(auth)])
+def field_catalog():
+    """Fields a run can retrieve or refresh, which agent produces them and where an approved value would go."""
+    from agentic.fields import catalog_view
+    return {"fields": catalog_view()}
+
+
+@router.get("/providers", dependencies=[Depends(auth)])
+def providers():
+    """Configured provider/model, its tool-calling capability and an OFFLINE wire-format check (no network, no keys)."""
+    from agentic.llm import compat
+    svc = service()
+    llm = svc.runner.deps.llm
+    try:
+        check = compat.verify_tool_calling(llm.name, llm.model)
+    except ValueError:
+        check = {"ok": None, "note": "no offline emulator for this provider"}
+    cap = compat.capability(llm.name, llm.model)
+    import os
+    return {"selected": compat.selected_model_report(llm, svc.settings, os.environ),
+            "configured": {"provider": llm.name, "model": llm.model, "listed": cap is not None,
+                           "capability": None if cap is None else compat.registry_view()[
+                               [(c["provider"], c["model"]) for c in compat.registry_view()].index((cap.provider, cap.model))],
+                           "offline_check": check},
+            "registry": compat.registry_view(),
+            "note": "Providers are chosen explicitly (AGENTIC_LLM_PROVIDER / AGENTIC_MODEL). There is no automatic fallback."}
+
+
+class ChangeSetSelection(BaseModel):
+    item_ids: list[str] | None = Field(default=None, max_length=100,
+                                       description="Change-set item ids to propose; omit for every reviewable item.")
+
+
+@router.post("/runs/{run_id}/changeset/proposals", dependencies=[Depends(approver_auth)])
+def changeset_to_proposals(run_id: str, sel: ChangeSetSelection | None = None):
+    """Bridge: reviewed change-set items -> validated PENDING proposals. Nothing is written; approval and apply are
+    separate, human-gated calls. Items whose CRM value changed since the review come back as `stale_items`."""
+    svc = service()
+    run = _run_or_404(svc, run_id)
+    if run["status"] not in ("completed", "partial"):
+        raise HTTPException(409, detail=f"run is {run['status']}")
+    try:
+        return redact_obj(svc.runner.propose_from_change_set(run_id, sel.item_ids if sel else None), max_str=6000)
+    except RuntimeError as exc:
+        raise HTTPException(409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc))
+
+
+@router.get("/runs/{run_id}/changeset", dependencies=[Depends(auth)])
+def run_changeset(run_id: str):
+    """Field-level change set for review (old vs proposed value, sources, confidence, validation). Read-only."""
+    run = _run_or_404(service(), run_id)
+    cs = (run["report"] or {}).get("change_set") if run["report"] else None
+    if cs is None:
+        raise HTTPException(409 if run["status"] in ("queued", "running", "awaiting_approval") else 404,
+                            detail=f"change set not available (status: {run['status']})")
+    return redact_obj(cs, max_str=6000)
 
 
 @router.get("/runs", dependencies=[Depends(auth)])

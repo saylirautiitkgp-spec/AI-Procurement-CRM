@@ -16,6 +16,10 @@ def call_llm(deps, budgets: dict, *, system: str, messages: list, tools: list, e
     reason = bud.run_limit_reason(limits, budgets)
     if reason:
         raise BudgetStop(reason)
+    from agentic.llm.pacing import estimate_request_tokens
+    est = estimate_request_tokens(system, messages, tools, limits.max_output_tokens)
+    if budgets["input_tokens"] + budgets["output_tokens"] + est > limits.max_total_tokens_run:
+        raise BudgetStop("max_tokens_reached")           # this request could take the run past its token cap
     budgets["llm_calls"] += 1
     if agent != "supervisor" and count_agent:
         budgets["agent_llm_calls"] += 1

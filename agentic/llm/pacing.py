@@ -30,9 +30,12 @@ class ProviderQuota:
     headroom: float = 0.8          # never plan to use more than 80% of any limit
 
     @classmethod
-    def parse(cls, text: str, headroom: float = 0.8) -> "ProviderQuota":
-        """'rpm=30,tpm=8000,rpd=1000,tpd=200000' - all four are required (no assumed limits)."""
+    def parse(cls, text: str, headroom: float = 0.8, require_tpd: bool = True) -> "ProviderQuota":
+        """'rpm=30,tpm=8000,rpd=1000,tpd=200000' - all four are required (no assumed limits). With
+        require_tpd=False an omitted tpd means "the console shows no tokens/day limit" (not enforced)."""
         parts = dict(p.strip().split("=", 1) for p in text.split(",") if "=" in p)
+        if not require_tpd and "tpd" not in parts:
+            parts["tpd"] = str(10 ** 12)
         missing = [k for k in ("rpm", "tpm", "rpd", "tpd") if k not in parts]
         if missing:
             raise ValueError(f"quota is missing: {', '.join(missing)}")

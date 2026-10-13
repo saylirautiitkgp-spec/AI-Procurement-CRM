@@ -48,7 +48,13 @@ select jsonb_build_object(
   'triggers', (
     select coalesce(jsonb_agg(jsonb_build_object(
              'table', event_object_table, 'trigger', trigger_name, 'event', event_manipulation)), '[]'::jsonb)
-    from information_schema.triggers where trigger_schema = 'public')
+    from information_schema.triggers where trigger_schema = 'public'),
+  'columns', (
+    select coalesce(jsonb_agg(jsonb_build_object(
+             'table', table_name, 'column', column_name, 'data_type', data_type, 'nullable', is_nullable,
+             'default', column_default, 'identity', is_identity)),
+           '[]'::jsonb)
+    from information_schema.columns where table_schema = 'public')
 ) as introspection;
 """
 
@@ -72,7 +78,9 @@ def analyze(raw: dict) -> dict:
     restrict = sorted(t for t, v in tables.items() if v["on_delete"] in ("RESTRICT", "NO ACTION"))
     setnull = sorted(t for t, v in tables.items() if v["on_delete"] in ("SET NULL", "SET DEFAULT"))
     rls = {r["table"]: r["rls_enabled"] for r in raw.get("rls", [])}
-    return {"tables": tables, "cascade_delete_tables": cascade, "blocking_delete_tables": restrict,
+    with_policy = {p["table"] for p in raw.get("policies", [])}
+    no_policy = sorted(t for t, on in rls.items() if on and t not in with_policy)
+    return {"tables": tables, "cascade_delete_tables": cascade, "rls_enabled_without_policy": no_policy, "blocking_delete_tables": restrict,
             "set_null_tables": setnull,
             "rls_enabled_tables": sorted(t for t, on in rls.items() if on),
             "rls_disabled_tables": sorted(t for t, on in rls.items() if not on),

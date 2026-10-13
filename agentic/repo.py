@@ -128,6 +128,11 @@ class SupabaseReadRepo:
         row["sector_name"] = self._sector_name(row.get("sector_id"))
         return row
 
+    def can_see_companies(self) -> bool:
+        """False when the key reads ZERO companies. With row level security enabled and no policies, a key that does not
+        bypass RLS gets empty results instead of errors - indistinguishable from 'company not found'."""
+        return bool(self._c.table("companies").select("company_id").limit(1).execute().data)
+
     def get_profile(self, company_id):
         rows = self._rows("company_profile", "*", company_id=company_id)
         return rows[0] if rows else None
