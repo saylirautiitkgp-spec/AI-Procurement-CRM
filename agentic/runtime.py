@@ -14,7 +14,7 @@ from langgraph.types import Command
 
 from agentic.graph import build_graph
 from agentic.proposals import ProposalService
-from agentic.llm.base import RetryingLLM
+from agentic.llm.base import RetryingLLM, is_capacity_503
 from agentic.persistence.store import Store
 from agentic.state import initial_state
 from agentic.tools.registry import Tool, ToolOutput, ToolRegistry
@@ -59,7 +59,8 @@ def build_registry(specs: dict, extra_tools: list[Tool] | None = None, efficienc
 def make_deps(*, llm, repo, search, fetcher, store: Store, settings: Settings, specs: dict,
               commit_repo: Any = None, sleep=time.sleep, extra_tools=None) -> Deps:
     wrapped = RetryingLLM(llm, max_retries=settings.limits.llm_max_retries,
-                          base_delay=settings.limits.llm_backoff_base_s, sleep=sleep)
+                          base_delay=settings.limits.llm_backoff_base_s, sleep=sleep,
+                          retry_if=is_capacity_503 if settings.limits.retry_503_only else None)
     return Deps(llm=wrapped, registry=build_registry(specs, extra_tools, settings.efficiency), store=store, repo=repo,
                 search=search, fetcher=fetcher, commit_repo=commit_repo, settings=settings, sleep=sleep)
 
@@ -78,13 +79,23 @@ class AgenticRunner:
 
     def start(self, company_name: str, objective: str | None = None, run_id: str | None = None,
               propose_changes: bool = False, fields: list | None = None, refresh: bool = False,
-              expected_company_id: int | None = None) -> dict:
+              expected_company_id: int | None = None, company_only: bool = False,
+              scope_agents: list | None = None, pinned_identity_website: str | None = None) -> dict:
         """`fields` = exactly which data to retrieve (names or aliases from agentic/fields.py). Only the agents those
         fields need are run. `refresh` re-verifies company fields the CRM already holds; without it they are skipped."""
         from agentic import fields as fl
         keys, unknown = fl.resolve_fields(fields)
         if unknown:
             raise ValueError("unknown_fields: " + ", ".join(unknown))
+        scope = list(scope_agents) if scope_agents else (["company"] if company_only else None)
+        if scope:                              # explicit scoped run: only the named agents' fields, nothing else
+            unknown_agents = [a for a in scope if a not in self.specs]
+            if unknown_agents or ("company" not in scope and not pinned_identity_website):
+                raise ValueError("invalid_scope: " + ", ".join(unknown_agents or ["company is required"]))
+            keys = keys or fl.agent_fields(scope)
+            foreign = [k for k in keys if fl.BY_KEY[k].agent not in scope]
+            if foreign:
+                raise ValueError("company_only_allows_company_fields: " + ", ".join(foreign))
         run_id = run_id or uuid.uuid4().hex[:12]
         objective = objective or (("Retrieve" + (" and refresh" if refresh else "") + ": " +
                                    ", ".join(fl.BY_KEY[k].label for k in keys)) if keys else DEFAULT_OBJECTIVE)
@@ -94,7 +105,20 @@ class AgenticRunner:
             options.update(fields=keys, refresh=bool(refresh))
         if expected_company_id is not None:
             options["expected_company_id"] = int(expected_company_id)
+        if pinned_identity_website:
+            if scope != ["procurement"] or not expected_company_id:
+                raise ValueError("pinned_identity_requires_procurement_only_scope_and_expected_company_id")
+            options["pinned_identity_website"] = str(pinned_identity_website)
+        if scope:
+            options["scope_agents"] = scope
+            options["company_only"] = scope == ["company"]
         state = initial_state(run_id, company_name, objective, options)
+        client, hops = self.deps.llm, 0
+        while client is not None and hops < 6:           # per-run request caps count from zero for every run
+            begin = getattr(client, "begin_run", None)
+            if callable(begin):
+                begin()
+            client, hops = getattr(client, "inner", None), hops + 1
         from agentic.guards import select_budget as sb
         limit = self.deps.limits.max_db_selects_run
         token = sb.activate(sb.SelectBudget(limit) if limit else None)    # ONE budget for the whole run, all agents/branches

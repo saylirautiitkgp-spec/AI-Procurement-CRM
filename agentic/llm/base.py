@@ -57,18 +57,26 @@ class LLMClient(Protocol):
                  max_output_tokens: int, force_tool: bool = False) -> LLMResponse: ...
 
 
+def is_capacity_503(err: "LLMError") -> bool:
+    """A 503 'high demand / UNAVAILABLE' capacity error - the only failure worth one patient retry."""
+    low = str(err).lower()
+    return err.kind == "transient" and ("503" in low or "unavailable" in low or "high demand" in low) \
+        and "timed out" not in low
+
+
 class RetryingLLM:
     """Bounded retry with exponential backoff for rate limits / transient errors.
-    Quota exhaustion is never retried."""
+    Quota exhaustion is never retried. `retry_if`, when set, narrows which errors may be retried at all."""
 
     def __init__(self, inner: LLMClient, max_retries: int = 2, base_delay: float = 1.0,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, retry_if: Callable[["LLMError"], bool] | None = None):
         self.inner = inner
         self.name = inner.name
         self.model = inner.model
         self.max_retries = max_retries
         self.base_delay = base_delay
         self._sleep = sleep
+        self.retry_if = retry_if
         self.retries = 0
         self._lock = threading.Lock()      # parallel agents share one client: requests go out one at a time
 
@@ -83,6 +91,8 @@ class RetryingLLM:
                 return self.inner.generate(**kwargs)
             except LLMError as err:
                 if err.kind not in ("rate_limit", "transient") or attempt >= self.max_retries:
+                    raise
+                if self.retry_if is not None and not self.retry_if(err):
                     raise
                 delay = err.retry_after if err.retry_after else self.base_delay * (2 ** attempt)
                 self._sleep(min(delay, 30.0))

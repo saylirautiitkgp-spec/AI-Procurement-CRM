@@ -57,6 +57,14 @@ class Limits:
     prefetch_doc_chars: int = 2_500         # page text per document shown to the model
     prefetch_packet_chars: int = 7_500      # hard cap for the whole packet
     prefetch_min_chars: int = 300           # less page text than this = packet "insufficient" (fallback)
+    # Company-only single-call extraction (run option `company_only`): ONE structured request carries every requested
+    # company field, so the packet may be larger (bounded) and the answer needs room for many claims.
+    company_only_output_tokens: int = 4096
+    company_only_packet_chars: int = 12_000
+    company_only_doc_chars: int = 4_000
+    company_correction_requests: int = 0    # extra request allowed after rejected claims (0 = none); AGENTIC_COMPANY_CORRECTION
+    max_requests_total: int | None = None   # hard cap on requests SENT in one run, retries included; AGENTIC_MAX_REQUESTS_TOTAL
+    retry_503_only: bool = False            # retry only a 503 capacity error (never 429, timeouts, 4xx); AGENTIC_RETRY_503_ONLY
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         max_db_selects_run=(_int("AGENTIC_MAX_DB_SELECTS", 0) or None),
         llm_max_retries=max(0, _int("AGENTIC_LLM_RETRIES", Limits.llm_max_retries)),
         llm_request_timeout_s=float(max(5, _int("AGENTIC_LLM_TIMEOUT_S", int(Limits.llm_request_timeout_s)))),
+        company_correction_requests=min(1, max(0, _int("AGENTIC_COMPANY_CORRECTION", Limits.company_correction_requests))),
+        max_requests_total=(_int("AGENTIC_MAX_REQUESTS_TOTAL", 0) or None),
+        retry_503_only=env.get("AGENTIC_RETRY_503_ONLY", "0") == "1",
+        llm_backoff_base_s=float(max(1, _int("AGENTIC_LLM_BACKOFF_S", int(Limits.llm_backoff_base_s)))),
     )
     live = env.get("AGENTIC_MODE") == "live"
     return Settings(

@@ -489,3 +489,18 @@ count as confirmed). Re-run the SQL after any schema change; the current SQL als
   `official_website` is a regional page URL with a page-title quote). Human review of every item is required before any approval.
   Two Gemini replies were empty (no tool call) and wasted requests.
 
+
+## 17. Web platform (2026-10-14) - `docs/PLATFORM.md`
+
+A local web app for the runtime: `serve_platform.py` (launcher), `api/platform_app.py` + `api/platform_routes.py` (API + static serving),
+`frontend/` (vanilla HTML/CSS/ES modules, no build step), `agentic/crm_read.py` (read-only CRM data: Supabase or the bundled demo set),
+`agentic/demo_service.py` (SIMULATION research: scripted model + synthetic pages, no quota, cannot write). The Next.js `dashboard/` is
+still untouched. Start: `START_PLATFORM.bat` -> http://127.0.0.1:8000/ui/. Research modes: simulation (default) | live (needs `--quota`
+from the AI Studio console) | off; the guarded "apply" action exists only with `--research live --enable-writes` + an access token and
+goes through `agentic/apply_validated.py` (additive, validated, company-scoped, counted SELECTs). Live runs are preflight-checked
+server-side (`POST /platform/estimate` shows the plan; a blocked plan returns 409 and sends nothing). The official Motherson logo is
+NOT in the repo: drop it at `frontend/assets/motherson-logo.svg|png`. Other changes in this session: `preflight` no longer BLOCKS a
+plan only because it exceeds requests/minute (the paced client waits; it blocks only if the waiting alone exceeds the wall-clock limit);
+per-run request caps reset at every run start (`PacedLLM.begin_run`); `ApplyBody.item_ids` lets the approver pick items.
+Verified in headless Chrome against both the demo set and the real 904-company CRM (read-only), zero console errors.
+Unverified: a live research run launched FROM the web app (the same code path as `agentic.company_live`, but not clicked live yet).

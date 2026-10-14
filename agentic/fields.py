@@ -88,6 +88,34 @@ def resolve_fields(requested) -> tuple[list[str], list[str]]:
     return keys, unknown
 
 
+def agent_fields(agents) -> list[str]:
+    """Every catalog field the given agents produce, in catalog order."""
+    return [f.key for f in CATALOG if f.agent in set(agents)]
+
+
+# Where every enriched field lives. LAYERS: `core` = columns of public.companies; `extended` = public.company_profile (one row
+# per company, unique company_id); `insight` = only a sourced ai_insights row (no column holds it); `report_only` = never stored.
+# PROVENANCE: every written core/extended field also gets one sourced ai_insights row (type 'Verified <field>').
+DERIVED_NOT_WRITTEN = {"website_domain": "company_profile.website_domain - would come from the verified identity domain; "
+                                         "not written by the change-set path (needs its own reviewed item)"}
+
+
+def canonical_destinations() -> dict:
+    out = {}
+    for f in CATALOG:
+        layer = {"companies": "core", "company_profile": "extended", "ai_insights": "insight", "contacts": "other_entity",
+                 "company_suppliers": "other_entity"}.get(f.table, "report_only")
+        out[f.key] = {"layer": layer, "target": f"{f.table}.{f.column}" if f.table and f.column else f.table,
+                      "provenance": "this ai_insights row" if layer == "insight" else
+                                    ("ai_insights" if layer in ("core", "extended") else None)}
+    return out
+
+
+def company_agent_fields() -> list[str]:
+    """Every catalog field the Company Intelligence agent produces, in catalog order."""
+    return agent_fields(["company"])
+
+
 def catalog_view() -> list[dict]:
     return [{"key": f.key, "label": f.label, "agent": f.agent, "entity": f.entity,
              "stores_to": f"{f.table}.{f.column}" if f.table and f.column else f.table, "aliases": list(f.aliases)}

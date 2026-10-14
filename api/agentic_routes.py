@@ -66,6 +66,8 @@ class RunRequest(BaseModel):
     refresh: bool = Field(default=False, description="Re-verify company fields the CRM already holds.")
     expected_company_id: int | None = Field(default=None, ge=1, description=(
         "Pin the run to ONE existing CRM record. The run fails instead of researching or proposing a different/new company."))
+    company_only: bool = Field(default=False, description=(
+        "Run ONLY the Company Intelligence agent: no supervisor model call, no other agent, one structured model request."))
 
 
 class Decision(BaseModel):
@@ -93,9 +95,9 @@ def start_run(req: RunRequest):
     svc = service()
     try:
         run_id = svc.submit(req.company_name, req.objective, req.propose_changes, req.fields, req.refresh,
-                            req.expected_company_id)
+                            req.expected_company_id, req.company_only)
     except ValueError as exc:
-        if str(exc).startswith("unknown_fields"):
+        if str(exc).startswith(("unknown_fields", "company_only_allows")):
             raise HTTPException(422, detail=str(exc))
         raise HTTPException(422, detail="invalid company name")
     except QueueFull:

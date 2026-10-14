@@ -42,7 +42,12 @@ _CAPS = (
     ModelCapability("gemini", "gemini-3-flash-preview", True, True, True, True,
                     "Integration smoke passed 2026-10-10; free tier 20 requests/day. Google may use free-tier content.",
                     _GEMINI3_REQ),
-    ModelCapability("gemini", "gemini-2.5-flash", True, True, True, False, "Documented function calling; not run here.",
+    ModelCapability("gemini", "gemini-3.8-flash", True, True, True, False,
+                    "Named by the API's own 404 for gemini-2.5-flash on 2026-10-13 (\"no longer available to new users\"); "
+                    "Gemini-3 family, so the Gemini-3 request rules apply. Not run live yet; quota must come from YOUR console.",
+                    _GEMINI3_REQ),
+    ModelCapability("gemini", "gemini-2.5-flash", True, True, True, False,
+                    "LIVE 2026-10-13: the API answered 404 NOT_FOUND 'no longer available to new users' for this key.",
                     _GEMINI_REQ),
     ModelCapability("groq", "openai/gpt-oss-120b", True, True, False, True,
                     "Integration passed 2026-10-11; one live run produced a call to an undeclared tool (now rejected "

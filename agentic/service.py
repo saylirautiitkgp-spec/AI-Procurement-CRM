@@ -43,7 +43,8 @@ class AgenticService:
         self._futures: dict[str, Any] = {}
 
     def submit(self, company_name: str, objective: str | None, propose_changes: bool = False,
-               fields: list | None = None, refresh: bool = False, expected_company_id: int | None = None) -> str:
+               fields: list | None = None, refresh: bool = False, expected_company_id: int | None = None,
+               company_only: bool = False, scope_agents: list | None = None) -> str:
         name = clean_company_name(company_name)
         if name is None:
             raise ValueError("invalid_company_name")
@@ -51,6 +52,8 @@ class AgenticService:
         _, unknown = fl.resolve_fields(fields)
         if unknown:
             raise ValueError("unknown_fields: " + ", ".join(unknown))
+        if company_only and any(fl.BY_KEY[k].agent != "company" for k in fl.resolve_fields(fields)[0]):
+            raise ValueError("company_only_allows_company_fields")
         with self._lock:
             if self._outstanding >= self.max_queue + self.settings.limits.max_concurrent_runs:
                 raise QueueFull("too many runs queued")
@@ -59,13 +62,15 @@ class AgenticService:
         self.store.upsert_run(run_id, company_name=name, objective=objective or "", status="queued",
                               tracker={"run_id": run_id, "company_submitted": name, "status": "queued"})
         self._futures[run_id] = self._pool.submit(self._run, run_id, name, objective, propose_changes, fields, refresh,
-                                                  expected_company_id)
+                                                  expected_company_id, company_only, scope_agents)
         return run_id
 
-    def _run(self, run_id, name, objective, propose_changes, fields=None, refresh=False, expected_company_id=None):
+    def _run(self, run_id, name, objective, propose_changes, fields=None, refresh=False, expected_company_id=None,
+             company_only=False, scope_agents=None):
         try:
             self.runner.start(name, objective, run_id=run_id, propose_changes=propose_changes,
-                              fields=fields, refresh=refresh, expected_company_id=expected_company_id)
+                              fields=fields, refresh=refresh, expected_company_id=expected_company_id,
+                              company_only=company_only, scope_agents=scope_agents)
         except Exception as exc:  # noqa: BLE001 - report a safe error, never the exception text (may echo inputs)
             self.store.upsert_run(run_id, status="failed",
                                   tracker={"run_id": run_id, "company_submitted": name, "status": "failed",
@@ -171,6 +176,7 @@ def build_live_service(env: Mapping[str, str] | None = None, factories: Mapping[
     if quota is not None:
         from agentic.llm.pacing import PacedLLM
         llm = PacedLLM(llm, quota, store)
+        llm.max_total = settings.limits.max_requests_total
     search = f.get("search", default_search)()
     fetcher = f.get("fetcher", default_fetcher)()
     repo = f.get("repo", default_repo)()

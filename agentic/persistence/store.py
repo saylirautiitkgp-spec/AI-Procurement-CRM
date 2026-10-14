@@ -70,6 +70,35 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("INSERT INTO llm_usage VALUES(?,?,?)", (ts, key, int(tokens)))
 
+    def usage_reserve(self, key: str, now: float, window_s: float, max_requests: int, est_tokens: int,
+                      max_tokens: int | None = None) -> tuple[bool, int, int, int | None]:
+        """Atomically (one SQLite write transaction, safe across threads AND processes) check the rolling window and,
+        if there is room, record ONE request before it is sent. Returns (ok, requests_used, tokens_used, row_id) where
+        the counts are those BEFORE this reservation. A reservation is never released: a request that fails after it
+        was sent may still have consumed provider quota."""
+        with self._lock:
+            self._conn.commit()                              # no open implicit transaction before BEGIN IMMEDIATE
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute("SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM llm_usage WHERE key=? AND ts>?",
+                                         (key, now - window_s)).fetchone()
+                reqs, toks = int(row[0]), int(row[1])
+                if reqs + 1 > max_requests or (max_tokens is not None and toks + est_tokens > max_tokens):
+                    self._conn.execute("ROLLBACK")
+                    return False, reqs, toks, None
+                cur = self._conn.execute("INSERT INTO llm_usage VALUES(?,?,?)", (now, key, int(est_tokens)))
+                self._conn.execute("COMMIT")
+                return True, reqs, toks, cur.lastrowid
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                raise
+
+    def usage_finalize(self, row_id: int, tokens: int) -> None:
+        """Replace a reservation's estimated tokens with the measured ones."""
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE llm_usage SET tokens=? WHERE rowid=?", (int(tokens), int(row_id)))
+
     def usage_since(self, key: str, seconds: float, now: float) -> tuple[int, int]:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*), COALESCE(SUM(tokens), 0) FROM llm_usage WHERE key=? AND ts>?",

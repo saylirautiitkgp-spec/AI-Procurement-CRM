@@ -21,6 +21,7 @@ from typing import Any
 
 from agentic import evidence as ev
 from agentic import fields as fl
+from agentic import website_map
 from agentic.claimid import claim_key  # noqa: F401 - re-exported
 
 _BASIS = "quote found verbatim in a document retrieved in this run; value supported by the quote"
@@ -111,10 +112,19 @@ def build_change_set(state: dict) -> dict:
                                                    "source_urls": [e["url"] for e in c["evidence"]]} for c in found]})
                 continue
             best = max(found, key=lambda c: c["confidence"])
+            proposed = best["value"]
+            if key == "official_website":          # companies.website is the SITE ROOT, or it stays empty
+                root, why = website_map.canonical_website(best["value"], state.get("ledger") or {}, subject.get("name") or "")
+                if root is None:
+                    unresolved.append({"field": key, "label": spec.label, "old_value": old, "reason": "website_root_not_supported",
+                                       "detail": why, "candidates": [{"value": best["value"], "confidence": best["confidence"],
+                                                                      "source_urls": [e["url"] for e in best["evidence"]]}]})
+                    continue
+                proposed = root                    # the claim (and its claim_key) stay as the agent made them
             empty = old in (None, "", [], {})
-            action = "fill_empty" if empty else ("no_change" if _norm(old) == _norm(best["value"]) else "update_conflict")
+            action = "fill_empty" if empty else ("no_change" if _norm(old) == _norm(proposed) else "update_conflict")
             legacy = _legacy(spec, existing)
-            items.append(_item(spec, best, old, best["value"], action,
+            items.append(_item(spec, best, old, proposed, action,
                                **({"legacy_values": legacy, "notes": "Legacy column(s) shown for context only; they are "
                                    "never written."} if legacy else {})))
         elif spec.agent == "procurement":          # list-like procurement findings: new insights, never overwrites

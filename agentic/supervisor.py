@@ -164,6 +164,8 @@ def decide(state: dict, deps, specs: dict, emitter: Emitter) -> tuple[dict, dict
     budgets = state["budgets"]
     elig = eligibility(state, specs, limits)
     eff = (state.get("options") or {}).get("efficiency") or {}
+    if (state.get("options") or {}).get("scope_agents") or (state.get("options") or {}).get("company_only"):
+        return routing.route_scoped(state, elig), elig       # explicit scoped run: Python plans, no supervisor LLM call
     if eff.get("skip_forced_finish") and not any(e["eligible"] for e in elig.values()):
         return {"next": "finish", "reason": "no agent is eligible - finish is forced (decided without an LLM call)",
                 "vetoes": [], "error": None, "deterministic": True}, elig

@@ -64,7 +64,13 @@ class PacedLLM:
         self._window: list[tuple[float, int]] = []          # (timestamp, tokens) in the last 60 s
         self.waited_s = 0.0
         self.local_refusals = 0
+        self.max_total: int | None = None      # hard cap on requests sent through THIS client (retries included)
+        self.sent = 0
         self._key = f"{inner.name}:{inner.model}"
+
+    def begin_run(self) -> None:
+        """A new research run starts: its request cap (max_total) counts from zero. Daily budgets are NOT reset."""
+        self.sent = 0
 
     def _prune(self, now: float) -> None:
         self._window = [(t, k) for t, k in self._window if now - t < 60.0]
@@ -76,7 +82,12 @@ class PacedLLM:
             self.local_refusals += 1
             raise LLMError("invalid", f"estimated request size {est} tokens exceeds the {q.tpm} tokens/minute limit; "
                                       "shrink the prompt (fewer/shorter tool results) - not sent")
-        self._daily_check(est)
+        if self.max_total is not None and self.sent >= self.max_total:
+            self.local_refusals += 1
+            raise LLMError("quota", f"run request cap of {self.max_total} reached - not sent")
+        reserving = self.log is not None and hasattr(self.log, "usage_reserve")
+        if not reserving:
+            self._daily_check(est)                       # simple logs without atomic reservation: check-then-send
         waited = 0.0
         while True:
             now = self._clock()
@@ -95,12 +106,30 @@ class PacedLLM:
             self._sleep(delay)
             waited += delay
         self.waited_s += waited
+        row_id = None
+        if reserving:                                    # capacity is claimed atomically BEFORE the request leaves
+            stamp = self._clock()
+            ok, reqs, toks, row_id = self.log.usage_reserve(
+                self._key, stamp, 86400, int(q.rpd * q.headroom), est, int(q.tpd * q.headroom))
+            if not ok:
+                self.local_refusals += 1
+                if reqs + 1 > int(q.rpd * q.headroom):
+                    raise LLMError("quota", f"local daily request budget reached ({reqs} in the last 24 h, limit "
+                                            f"{q.rpd}, planning cap {int(q.rpd * q.headroom)}) - not sent")
+                raise LLMError("quota", f"local daily token budget would be exceeded ({toks} used in the last 24 h + "
+                                        f"~{est}, limit {q.tpd}, planning cap {int(q.tpd * q.headroom)}) - not sent")
+            self._window.append((stamp, est))
+        self.sent += 1
         resp = self.inner.generate(**kw)
         used_tokens = (resp.usage.input_tokens + resp.usage.output_tokens) or est
-        stamp = self._clock()
-        self._window.append((stamp, used_tokens))
-        if self.log is not None:
-            self.log.usage_add(self._key, used_tokens, stamp)
+        if reserving:
+            self.log.usage_finalize(row_id, used_tokens)
+            self._window[-1] = (self._window[-1][0], used_tokens)
+        else:
+            stamp = self._clock()
+            self._window.append((stamp, used_tokens))
+            if self.log is not None:
+                self.log.usage_add(self._key, used_tokens, stamp)
         return resp
 
     def _daily_check(self, est: int) -> None:

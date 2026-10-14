@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import Field
 
 from agentic import evidence as ev
+from agentic import field_support
 from agentic import gaps as gp
 from agentic import names
 from agentic.agents.common import (AgentSpec, BaseFindings, EvidenceRefModel, FieldClaim,
@@ -103,6 +104,11 @@ def process_company(state: dict, findings: dict, deps) -> ProcessResult:
         if fld == "linkedin_url" and ev.registrable_domain(str(value)) != "linkedin.com":
             res.rejected.append({"field": fld, "value": value, "reasons": ["not_a_linkedin_url"]})
             continue
+        if fld == "linkedin_url":                           # the page must be about THIS company: its slug carries the name
+            slug = ev.norm_text(str(value).split("linkedin.com", 1)[-1]).replace(" ", "")
+            if not any(t in slug for t in names.distinctive_tokens(name)):
+                res.rejected.append({"field": fld, "value": value, "reasons": ["linkedin_slug_does_not_match_company"]})
+                continue
         check = validate_refs(ledger, [e for e in claim["evidence"]], value, official_domain,
                               require_value_support=fld not in ("official_website", "linkedin_url"))
         if fld in ("official_website", "linkedin_url") and check["ok"]:
@@ -110,6 +116,11 @@ def process_company(state: dict, findings: dict, deps) -> ProcessResult:
             if ev.registrable_domain(str(value)) not in {ev.registrable_domain(e["url"]) for e in check["evidence"]} \
                and fld == "official_website":
                 check = {**check, "ok": False, "reasons": ["evidence_not_from_claimed_site"]}
+        if check["ok"] and fld not in ("official_website", "linkedin_url"):
+            # a quote that merely mentions the value is not enough: its sentence must state THIS field
+            sup_ok, sup_reason = field_support.check(fld, value, [e["snippet"] for e in check["evidence"]])
+            if not sup_ok:
+                check = {**check, "ok": False, "reasons": [sup_reason]}
         if not check["ok"]:
             res.rejected.append({"field": fld, "value": value, "reasons": check["reasons"]})
             continue

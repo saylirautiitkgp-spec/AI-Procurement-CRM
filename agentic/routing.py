@@ -148,3 +148,32 @@ def route_for_fields(state: dict, elig: dict, *, parallel: bool, max_parallel: i
                 "reason": f"field plan: {', '.join(agents)} are independent and run in parallel"}
     return {"next": runnable[0], "vetoes": [], "deterministic": True, "error": None,
             "reason": f"field plan: {runnable[0]} (needed agents: {', '.join(need)})"}
+
+
+def route_scoped(state: dict, elig: dict) -> dict:
+    """Next step of an explicit SCOPED run (e.g. Company, then Procurement): the planned agents in stage order, each once.
+    No supervisor LLM call, and no agent outside the scope can be chosen - not by a model, not by prerequisites, not by
+    'suggest_next'. A planned agent that cannot run (identity not confirmed, no search) ends the run as partial."""
+    from agentic import fields as fl
+    opts = state.get("options") or {}
+    scope = list(opts.get("scope_agents") or ["company"])
+    base = {"vetoes": [], "deterministic": True, "error": None}
+    todo, _ = fl.next_stage(state)
+    if not todo:
+        ran = sorted(a for a, n in state["agent_runs"].items() if n >= 1)
+        if not ran:
+            return {**base, "next": "finish", "stop": "nothing_to_research",
+                    "reason": "requested fields are already stored in the CRM; nothing to research (use refresh)"}
+        return {**base, "next": "finish", "reason": f"scoped run complete ({', '.join(ran)})"}
+    nxt = todo[0]
+    if nxt not in scope:
+        return {**base, "next": "finish", "error": "scope_violation",
+                "reason": f"planned agent '{nxt}' is outside the run's scope {scope}"}
+    e = elig.get(nxt, {"eligible": False, "reason": "unknown agent"})
+    if not e["eligible"]:
+        return {**base, "next": "finish", "error": "planned_agent_blocked",
+                "reason": f"planned agent '{nxt}' cannot run: {e['reason']}"}
+    return {**base, "next": nxt, "reason": f"scoped run {scope}: {nxt} is next"}
+
+
+route_company_only = route_scoped          # earlier name

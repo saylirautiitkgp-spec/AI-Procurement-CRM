@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import dataclasses
 import json
 import re
 
@@ -63,6 +64,41 @@ def _tpm_limit(llm) -> int | None:
             return quota.tpm
         llm = getattr(llm, "inner", None)
     return None
+
+
+def scope_agents(state) -> list | None:
+    """The agents an explicit scoped run may use (None = unscoped, the normal supervisor-driven run)."""
+    opts = state.get("options") or {}
+    if opts.get("scope_agents"):
+        return list(opts["scope_agents"])
+    return ["company"] if opts.get("company_only") else None
+
+
+def bounded(state, name: str | None = None) -> bool:
+    """True when `name` (or any agent, if None) runs in the bounded single-request mode of a scoped run."""
+    scope = scope_agents(state)
+    return scope is not None and (name is None or name in scope)
+
+
+SINGLE_REQUEST_RULE = {
+    "company": (
+        "SINGLE REQUEST: this is this agent's only model request. Submit EVERY requested field you can support in ONE "
+        "`submit_company_findings` call. There is no search and no second turn. Claim a field only when a quoted sentence "
+        "itself states that field (revenue must be described as revenue/turnover/sales, a founding year as founded/"
+        "established, headquarters as headquarters/head office, employees as employees/workforce). A number or place that "
+        "merely appears in an unrelated sentence is not evidence. Leave unsupported fields out and list them in `unresolved`."),
+    "procurement": (
+        "SINGLE REQUEST: this is this agent's only model request. Submit EVERY finding you can support in ONE "
+        "`submit_procurement_findings` call. There is no search and no second turn. Report a supplier portal or "
+        "procurement page only when the quote itself says it is where suppliers register / the company's procurement "
+        "or sourcing page; report a purchasing category or purchased component only when the quoted sentence says the "
+        "company buys, sources or procures it (what the company SELLS or builds is not evidence). Leave unsupported "
+        "items out and list them in `unresolved`."),
+}
+
+
+def single_request_rule(spec) -> str:
+    return SINGLE_REQUEST_RULE.get(spec.name, SINGLE_REQUEST_RULE["company"])
 
 
 def _tool_message(call: dict, payload: dict, untrusted: bool) -> dict:
@@ -130,6 +166,37 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
         return routing.crm_sections_for(agents)
 
     # ------------------------------------------------------------------ intake
+    def reverify_pinned(state, subject, pin: str, em) -> dict:
+        """Procurement-only runs have no Company agent: the identity of an earlier verified run is NOT trusted as such -
+        it is re-verified here from the pinned page (cache first), exactly like the Company agent does. The search that
+        makes the domain 'known' is the company's own cached identity query."""
+        from agentic.agents.company import verify_identity
+        b = copy.deepcopy(state["budgets"])
+        ledger: dict = {}
+        ok, reason, domain, cached = False, "pinned_page_not_retrieved", "", None
+        for n, (tool, args) in enumerate((("web_search", {"query": f"{subject['name']} official website", "depth": "basic",
+                                                        "max_results": 5}), ("fetch_page", {"url": pin}))):
+            em.emit("tool_call", "procurement", tool=tool, args=args, pinned_identity=True)
+            res = executor.execute(agent="procurement", call=ToolCallRequest(id=f"pinned-{n}", name=tool, args=args),
+                                   budgets=b, ledger=ledger, subject=subject, claims={})
+            if not res.ok:
+                em.emit("tool_result", "procurement", tool=tool, ok=False, error=res.error, pinned_identity=True)
+                break
+            for d in res.docs:
+                ev.add_doc(ledger, url=d["url"], text=d.get("text", ""), title=d.get("title", ""), tool=tool,
+                           call_id=f"pinned-{n}", max_docs=limits.ledger_max_docs, max_chars=limits.ledger_doc_chars)
+            em.emit("tool_result", "procurement", tool=tool, ok=True, cached=res.cached, credits=res.credits,
+                    pinned_identity=True)
+            cached = res.cached
+            if tool == "fetch_page":
+                ok, reason, domain = verify_identity(ledger, pin, subject["name"])
+        em.emit("pinned_identity", "procurement", verified=ok, reason=reason, domain=domain)
+        if ok:
+            subject["identity"] = {"verified": True, "website": ev.canonical_url(pin), "domain": domain,
+                                   "reason": "pinned_identity_reverified:" + reason,
+                                   "reasoning": "re-verified in this run from the pinned page; no Company agent was run"}
+        return {"ledger": ledger, "budgets": b}
+
     def intake(state: RunState):
         try:
             out = _intake(state)
@@ -202,7 +269,11 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
         subject = {"name": name, "match": {"status": res["status"], "matches": res["matches"],
                                            "assumptions": res["assumptions"]},
                    "existing": existing, "identity": {"verified": False}}
-        return {"subject": subject, "status": "running", "errors": errors, "trace": em.events}
+        extra: dict = {}
+        pin = (state.get("options") or {}).get("pinned_identity_website")
+        if pin and existing is not None:
+            extra = reverify_pinned(state, subject, pin, em)
+        return {"subject": subject, "status": "running", "errors": errors, "trace": em.events, **extra}
 
     # -------------------------------------------------------------- supervisor
     def supervisor(state: RunState):
@@ -236,6 +307,10 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
         if sb.used() is not None:
             b["db_selects"] = sb.used()
         decision, elig = decide({**state, "budgets": b}, deps, specs, em)
+        scope = scope_agents(state)
+        if scope is not None and decision["next"] not in (*scope, "finish"):
+            decision = {"next": "finish", "reason": "scope_violation", "vetoes": [],
+                        "error": "scope_violation", "deterministic": True}
         history = list(state["route_history"]) + [{
             "step": steps + 1, "next": decision["next"], "reason": decision["reason"],
             "vetoes": decision["vetoes"], "eligible": [k for k, v in elig.items() if v["eligible"]],
@@ -272,6 +347,8 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
         shared = eff.get("ledger_hint") or (state.get("options") or {}).get("fields")      # reuse evidence already retrieved
         if shared and spec.name != "lead" and (hint := ledger_hint(state["ledger"])):
             task += "\n\n" + hint
+        if bounded(state, spec.name):
+            task += "\n\n" + single_request_rule(spec)
         return task
 
     def _budget_line(spec, b):
@@ -323,13 +400,26 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
             return {"agent_notes": notes, "budgets": b, "trace": em.events}
         msgs = list(state["agent_messages"])
         pre: dict = {}           # state updates made by the prefetch step (must survive every return below)
-        if eff.get("prefetch") and spec.prefetch and not wrap_up and not notes.get("prefetch_done"):
+        solo = bounded(state, name)
+        if solo and limits.max_requests_total and b["llm_calls"] + b["llm_retries"] + 1 > limits.max_requests_total:
+            notes["end_reason"] = "request_budget_exhausted"      # before any search credit is spent for this agent
+            em.emit("agent_limit", name, reason="request_budget_exhausted")
+            return {"agent_notes": notes, "budgets": b, "trace": em.events}
+        if solo and notes.get("company_requests", 0) >= 1 + limits.company_correction_requests:
+            notes["end_reason"] = "company_request_cap"        # hard cap: the plan counted exactly this many requests
+            em.emit("agent_limit", name, reason="company_request_cap")
+            return {"agent_notes": notes, "budgets": b, "trace": em.events}
+        if (eff.get("prefetch") or solo) and spec.prefetch and not wrap_up and not notes.get("prefetch_done"):
             ledger = copy.deepcopy(state["ledger"])
             requested = (state.get("options") or {}).get("fields")
             focus = (fields_mod.focus_company_fields(state) if name == "company" else
                      [k for k in requested if fields_mod.BY_KEY[k].agent == name]) if requested else None
+            pf_limits = (dataclasses.replace(limits, prefetch_doc_chars=limits.company_only_doc_chars,
+                                             prefetch_packet_chars=limits.company_only_packet_chars,
+                                             prefetch_max_pages=limits.prefetch_max_pages + 1)
+                         if solo else limits)
             outcome = spec.prefetch(executor=executor, agent=name, subject=state["subject"], ledger=ledger,
-                                    budgets=b, claims=state["claims"], limits=limits, fields=focus,
+                                    budgets=b, claims=state["claims"], limits=pf_limits, fields=focus,
                                     emit=lambda type_, **data: em.emit(type_, name, **data))
             notes["prefetch_done"] = True
             notes["prefetch"] = {"status": outcome.status, "reason": outcome.reason, "pages": outcome.pages}
@@ -337,12 +427,16 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
             if outcome.text:           # appended to the task (first message); the stored history keeps it for audit
                 msgs[0] = {**msgs[0], "content": msgs[0]["content"] + "\n\n" + outcome.text}
             pre = {"ledger": ledger, "agent_messages": msgs}
+            if solo and outcome.status != "packet":     # no usable evidence: asking the model would waste a request
+                notes["end_reason"] = "packet_insufficient"
+                em.emit("agent_limit", name, reason="packet_insufficient", detail=outcome.reason)
+                return {**pre, "agent_notes": notes, "budgets": b, "trace": em.events}
         if wrap_up:
             msgs.append({"role": "user", "content": "Tool budget reached. Submit your findings now with what "
                                                     "you have verified - do not call any other tool."})
         all_specs = [s for s in registry.specs_for(name) if s.name in spec.tool_names]
         packet_turn = bool(notes.get("packet_phase")) and not wrap_up
-        tools = [s for s in all_specs if s.name == spec.finish_tool] if (wrap_up or packet_turn) else all_specs
+        tools = [s for s in all_specs if s.name == spec.finish_tool] if (wrap_up or packet_turn or solo) else all_specs
         if eff.get("compact_schemas"):
             tools = [t.model_copy(update={"parameters": compact_schema(t.parameters)}) for t in tools]
         sent = compact_messages(msgs) if eff.get("compact_history") else msgs     # stored history stays complete
@@ -358,8 +452,11 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
         only_finish = len(tools) == 1 and tools[0].name == spec.finish_tool       # nothing else to choose: require it
         notes["offered_tools"] = [t.name for t in tools]        # the contract agent_tools enforces for this turn's calls
         try:
+            if solo:
+                notes["company_requests"] = notes.get("company_requests", 0) + 1     # counted BEFORE it is sent
             resp = call_llm(deps, b, system=system, messages=sent, tools=tools,
-                            emitter=em, agent=name, force_tool=wrap_up or only_finish, count_agent=not wrap_up)
+                            emitter=em, agent=name, force_tool=wrap_up or only_finish, count_agent=not wrap_up,
+                            max_output_tokens=limits.company_only_output_tokens if solo else None)
         except BudgetStop as stop:
             notes["end_reason"] = stop.reason
             return {**pre, "agent_notes": notes, "budgets": b, "trace": em.events}
@@ -372,6 +469,9 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
                      "provider_data": resp.provider_data})
         if resp.tool_calls:
             notes["no_tool_turns"] = 0
+        elif solo:                                       # an empty reply is never retried blindly
+            notes["end_reason"] = "empty_response"
+            em.emit("empty_response", name, has_text=bool(resp.text))
         else:
             notes["no_tool_turns"] = notes.get("no_tool_turns", 0) + 1
             if notes["no_tool_turns"] >= 2:
@@ -426,7 +526,11 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
                 em.emit("submit", name, accepted=len(pr.accepted), rejected=len(pr.rejected),
                         reasons=sorted({r for x in pr.rejected for r in x["reasons"]}),
                         status=res.data.get("status"))
-                retry = (pr.rejected and (not pr.accepted or deps.settings.retry_partial_rejections) and
+                if bounded(state, name):         # one correction only when the plan counted it; never a follow-up search
+                    may_correct = notes.get("company_requests", 0) < 1 + limits.company_correction_requests
+                else:
+                    may_correct = True
+                retry = (pr.rejected and may_correct and (not pr.accepted or deps.settings.retry_partial_rejections) and
                          b["agent_submit_attempts"] < limits.max_submit_attempts and
                          bud.agent_limit_reason(limits, b) is None and
                          bud.run_limit_reason(limits, b) is None)
@@ -435,7 +539,7 @@ def build_graph(deps, specs: dict, checkpointer=None, extra_nodes=None):
                     continue
                 if notes.get("packet_phase"):
                     notes["packet_phase"] = False                       # the packet turn is over
-                    todo = followup_todo(name, claims, state)
+                    todo = [] if bounded(state, name) else followup_todo(name, claims, state)
                     if (todo and not notes.get("followup_used") and bud.agent_limit_reason(limits, b) is None
                             and bud.run_limit_reason(limits, b) is None and bud.credits_remaining_run(limits, b) > 0):
                         notes["followup_used"] = True                   # ONE targeted follow-up, then finish

@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agentic import evidence as ev
+from agentic import field_support
 from agentic.agents.common import AgentSpec, BaseFindings, EvidenceRefModel, ProcessResult, validate_refs
 from agentic.prefetch import agent_prefetch
 
@@ -51,6 +52,12 @@ def process_procurement(state: dict, findings: dict, deps) -> ProcessResult:
             if not chk["ok"]:
                 res.rejected.append({**label, "reasons": chk["reasons"]})
                 continue
+        sup_ok, sup_reason = field_support.check_evidence(kind, value, chk["evidence"],
+                                                           company=state["subject"].get("name"),
+                                                           official_domain=ident.get("domain"))
+        if not sup_ok:                                     # the quote must say what this finding claims it is
+            res.rejected.append({**label, "reasons": [sup_reason]})
+            continue
         if (kind, value.lower()) in seen:
             continue
         seen.add((kind, value.lower()))

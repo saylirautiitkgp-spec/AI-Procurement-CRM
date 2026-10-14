@@ -100,3 +100,46 @@ class GuardedReadClient:
         if name in _WRITE_METHODS:
             raise PermissionError(f"read-only Supabase client: .{name}() is not allowed")
         raise AttributeError(f"GuardedReadClient exposes table() only, not {name!r}")
+
+
+# ------------------------------------------------------------------------------------------------ write-phase client
+_NEVER = {"delete", "upsert", "rpc"}
+
+
+class _CountedQuery:
+    """Query proxy of the WRITE phase: a SELECT is counted (and refused over the cap) BEFORE it is sent; insert/update pass
+    through (the commit repository's table/operation allow-list decides which); delete/upsert/rpc do not exist."""
+
+    def __init__(self, inner, table: str, budget: SelectBudget, kind: str | None = None):
+        self._inner, self._table, self._budget, self._kind = inner, table, budget, kind
+
+    def execute(self, *a, **kw):
+        if self._kind == "select":
+            self._budget.reserve(self._table)          # raises BEFORE anything is sent
+        return self._inner.execute(*a, **kw)
+
+    def __getattr__(self, name):
+        if name in _NEVER:
+            raise PermissionError(f"Supabase client of the write phase: .{name}() is not allowed")
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        kind = "select" if name == "select" else ("write" if name in ("insert", "update") else self._kind)
+
+        def chained(*a, **kw):
+            out = attr(*a, **kw)
+            return _CountedQuery(out, self._table, self._budget, kind) if hasattr(out, "execute") else out
+        return chained
+
+
+class CountedClient:
+    """Supabase client wrapper for the narrow write phase: own SELECT budget, no delete/upsert/rpc."""
+
+    def __init__(self, inner, budget: SelectBudget):
+        self._inner, self.budget = inner, budget
+
+    def table(self, name: str) -> _CountedQuery:
+        return _CountedQuery(self._inner.table(name), name, self.budget)
+
+    def __getattr__(self, name):
+        raise AttributeError(f"CountedClient exposes table() only, not {name!r}")

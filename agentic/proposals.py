@@ -52,13 +52,30 @@ def best_claims(claims: list[dict]) -> tuple[dict, list[dict]]:
     return chosen, conflicts
 
 
-def _insight_ops(company_ref, chosen: dict, agent: str) -> tuple[list[dict], list[dict]]:
+def _insight_key(insight_type, title) -> tuple:
+    return (str(insight_type or "").strip().lower(), str(title or "").strip().lower())
+
+
+def existing_insight_keys(commit_repo, company_id) -> set:
+    """(insight_type, insight_title) of every ai_insights row the company already has - ONE read, used to avoid
+    recording the same provenance twice."""
+    lister = getattr(commit_repo, "list_rows", None)
+    if lister is None or company_id is None:
+        return set()
+    return {_insight_key(r.get("insight_type"), r.get("insight_title")) for r in lister("ai_insights", company_id=company_id)}
+
+
+def _insight_ops(company_ref, chosen: dict, agent: str, known: set | None = None) -> tuple[list[dict], list[dict]]:
+    """One sourced ai_insights row per written field: insight_type 'Verified <field>', title '<field>: <value>', the exact
+    quote and its URL in `insight`, and the URL again in source_url. A row the company already has is not added again."""
     ops, evidence = [], []
     for fld, c in sorted(chosen.items()):
         e = c["evidence"][0]
+        title = f"{fld}: {c['value'] if not isinstance(c['value'], list) else ', '.join(c['value'])}"[:200]
+        if known is not None and _insight_key(f"Verified {fld}", title) in known:
+            continue
         ops.append({"table": "ai_insights", "op": "insert", "fields": {
-            "company_id": company_ref, "insight_type": f"Verified {fld}",
-            "insight_title": f"{fld}: {c['value'] if not isinstance(c['value'], list) else ', '.join(c['value'])}"[:200],
+            "company_id": company_ref, "insight_type": f"Verified {fld}", "insight_title": title,
             "insight": f"{e['snippet']} (source: {e['url']})"[:3900], "confidence_score": c["confidence"],
             "generated_by": agent, "source_url": e["url"], "source_type": "web", "status": "Active"}})
         evidence.extend(c["evidence"])
@@ -108,8 +125,11 @@ def company_proposals(state: dict, commit_repo, derived: bool = True) -> list[di
             mean = round(sum(c["confidence"] for c in chosen.values()) / len(chosen), 2)
             ops.append({"table": "company_profile", "op": "insert",
                         "fields": {"company_id": ref, **prof_fields, "confidence_score": mean}})
-    insight_ops, evidence = _insight_ops(ref, chosen, "agentic-company")
+    insight_ops, evidence = _insight_ops(ref, chosen, "agentic-company", existing_insight_keys(commit_repo, cid))
     ops.extend(insight_ops)
+    if not [o for o in ops if o["table"] != "ai_insights"]:       # nothing to fill: provenance alone is never written
+        return []
+    evidence = [e for _, c in sorted(chosen.items()) for e in c["evidence"]]     # evidence for EVERY written field
     return [{"kind": kind, "operations": ops, "evidence": evidence, "required_input": required,
              "claim_keys": [claim_key(c.get("agent") or "company", c) for c in chosen.values()],
              "conflicts_not_proposed": conflicts,
@@ -225,6 +245,7 @@ def procurement_insight_proposals(state: dict, commit_repo) -> list[dict]:
     (no existing column holds them); an identical insight already in the CRM is not proposed again."""
     cid = (state["subject"].get("existing") or {}).get("company_id")
     out = []
+    known = existing_insight_keys(commit_repo, cid)
     for c in state["claims"].get("procurement", []):
         if c.get("status") != "verified" or c.get("field") in ("supplier_portal", "procurement_page"):
             continue
@@ -235,7 +256,7 @@ def procurement_insight_proposals(state: dict, commit_repo) -> list[dict]:
             out.append(_blocked("insert_procurement_insight", f"Add procurement insight {title}", c["evidence"],
                                 claim_keys=ckey))
             continue
-        if commit_repo.find_one("ai_insights", company_id=cid, insight_title=title):
+        if any(k[1] == title.strip().lower() for k in known):
             continue
         out.append({"kind": "insert_procurement_insight", "evidence": c["evidence"], "required_input": [],
                     "claim_keys": ckey, "summary": f"Record sourced procurement insight '{title}'",
@@ -360,10 +381,13 @@ class ProposalService:
             reviewable = [i for i in reviewable if i["id"] in set(item_ids)]
         cid = existing.get("company_id")
         stale, usable = [], []
+        rows: dict = {}                                    # one live read per table, shared by every item
         for it in reviewable:
             table, _, col = (it.get("target") or "").partition(".")
             if cid is not None and it["entity"] == "company" and table in ("companies", "company_profile") and col:
-                live = (self.commit.get_row(table, {"company_id": cid}) or {}).get(col)
+                if table not in rows:
+                    rows[table] = self.commit.get_row(table, {"company_id": cid}) or {}
+                live = rows[table].get(col)
                 if json.dumps(live, sort_keys=True, default=str).lower() != \
                         json.dumps(it.get("old_value"), sort_keys=True, default=str).lower() and \
                         not (live in (None, "", [], {}) and it.get("old_value") in (None, "", [], {})):
@@ -372,10 +396,15 @@ class ProposalService:
                     continue
             usable.append(it)
         keys = {i["claim_key"] for i in usable}
+        reviewed_value = {i["claim_key"]: i["proposed_value"] for i in usable if i["field"] == "official_website"}
         filtered = copy.deepcopy(state)
         for agent in ("company", "procurement", "contact", "supplier"):
             filtered["claims"][agent] = [c for c in state["claims"].get(agent, [])
                                          if isinstance(c, dict) and claim_key(c.get("agent") or agent, c) in keys]
+        for c in filtered["claims"]["company"]:       # the reviewed website is the SITE ROOT, not the page that was quoted
+            k = claim_key(c.get("agent") or "company", c)
+            if k in reviewed_value:
+                c["value"] = reviewed_value[k]
         out = []
         for build in (lambda s, c: company_proposals(s, c, derived=False), contact_proposals, supplier_proposals,
                       procurement_insight_proposals):
@@ -482,6 +511,9 @@ class ProposalService:
                             component=cleaned.get("component")):
                         done.append({"op": "skip_duplicate", "table": "company_suppliers"})
                         continue
+                    if op["table"] == "company_profile" and cleaned.get("company_id") is not None and \
+                            self.commit.find_one("company_profile", company_id=cleaned["company_id"]):
+                        return self._fail(row, "profile_already_exists", done)      # re-propose: it becomes an additive update
                     if op["table"] == "contacts" and self.commit.find_one(
                             "contacts", company_id=cleaned["company_id"], contact_name=cleaned["contact_name"]):
                         return self._fail(row, "contact_already_exists", done)

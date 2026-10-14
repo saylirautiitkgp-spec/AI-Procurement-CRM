@@ -11,13 +11,15 @@ from agentic.state import Emitter
 
 
 def call_llm(deps, budgets: dict, *, system: str, messages: list, tools: list, emitter: Emitter,
-             agent: str, force_tool: bool = False, count_agent: bool = True) -> LLMResponse:
+             agent: str, force_tool: bool = False, count_agent: bool = True,
+             max_output_tokens: int | None = None) -> LLMResponse:
     limits = deps.limits
+    out_tokens = max_output_tokens or limits.max_output_tokens
     reason = bud.run_limit_reason(limits, budgets)
     if reason:
         raise BudgetStop(reason)
     from agentic.llm.pacing import estimate_request_tokens
-    est = estimate_request_tokens(system, messages, tools, limits.max_output_tokens)
+    est = estimate_request_tokens(system, messages, tools, out_tokens)
     if budgets["input_tokens"] + budgets["output_tokens"] + est > limits.max_total_tokens_run:
         raise BudgetStop("max_tokens_reached")           # this request could take the run past its token cap
     budgets["llm_calls"] += 1
@@ -28,7 +30,7 @@ def call_llm(deps, budgets: dict, *, system: str, messages: list, tools: list, e
     started = time.monotonic()
     try:
         resp = llm.generate(system=system, messages=messages, tools=tools,
-                            max_output_tokens=limits.max_output_tokens, force_tool=force_tool)
+                            max_output_tokens=out_tokens, force_tool=force_tool)
     except LLMError as exc:
         budgets["llm_retries"] += getattr(llm, "retries", 0) - retries_before
         emitter.emit("llm_error", agent, kind=exc.kind, message=str(exc)[:200],

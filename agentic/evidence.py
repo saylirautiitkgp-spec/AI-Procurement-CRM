@@ -92,7 +92,8 @@ def add_doc(ledger: dict, *, url: str, text: str, title: str = "", tool: str = "
     if not canon:
         return None
     did = doc_id_for(canon)
-    text = text or ""
+    text = (text or "").replace("�", "")          # a replacement character never enters the evidence ledger
+    title = (title or "").replace("�", "")
     existing = ledger.get(did)
     if existing is None:
         if len(ledger) >= max_docs:

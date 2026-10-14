@@ -36,6 +36,45 @@ class PageFetcher(Protocol):
     def fetch(self, url: str) -> FetchedPage: ...
 
 
+_LATIN_LABELS = {"iso-8859-1", "latin-1", "latin1", "us-ascii", "ascii", "iso8859-1"}
+
+
+def decode_body(raw: bytes, content_type: str = "") -> str:
+    """Bytes -> text without ever producing U+FFFD or mojibake.
+
+    `requests` reports ISO-8859-1 for 'text/html' without a charset (an RFC default nobody honours), and the old code
+    decoded with that label and errors='replace'. Order now: the declared charset (header, then <meta>) when it decodes
+    strictly - except that a latin-1/ascii label on a body that is valid UTF-8 with non-ASCII bytes is a mislabel and
+    UTF-8 wins; then strict UTF-8; then strict cp1252. Only if everything fails are undecodable bytes DROPPED (never
+    replaced), so no replacement character can enter the evidence ledger."""
+    declared = []
+    m = re.search(r"charset\s*=\s*[\"']?([\w\-]+)", content_type or "", re.I)
+    if m:
+        declared.append(m.group(1).lower())
+    meta = re.search(rb"<meta[^>]+charset\s*=\s*[\"']?([\w\-]+)", raw[:4096], re.I)
+    if meta:
+        declared.append(meta.group(1).decode("ascii", "ignore").lower())
+    utf8 = None
+    try:
+        utf8 = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    non_ascii = any(b > 127 for b in raw)
+    for enc in declared:
+        if enc in _LATIN_LABELS and utf8 is not None and non_ascii:
+            return utf8.replace("\ufffd", "")
+        try:
+            return raw.decode(enc).replace("\ufffd", "")
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if utf8 is not None:
+        return utf8.replace("\ufffd", "")
+    try:
+        return raw.decode("cp1252")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="ignore")
+
+
 def extract_page(html: str, base_url: str, max_links: int = 25) -> tuple[str, str, list[dict]]:
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(html, "html.parser")
@@ -127,7 +166,7 @@ class SafeHttpFetcher:
             if len(raw) > self.max_bytes:
                 raw, truncated = raw[: self.max_bytes], True
                 break
-        html = raw.decode(resp.encoding or "utf-8", errors="replace")
+        html = decode_body(raw, resp.headers.get("Content-Type", ""))
         title, text, links = extract_page(html, current)
         if len(text) > self.max_text_chars:
             text, truncated = text[: self.max_text_chars], True
