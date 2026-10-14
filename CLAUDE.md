@@ -1,38 +1,36 @@
 # CLAUDE.md - AI Procurement CRM (agentic rebuild)
 
 Read this first. It is the hand-over for the next agent: what the project is, what exists, what was decided, what is
-verified, what is blocked, and how to work safely here. Last updated 2026-10-12, branch `Agentic_branch`.
+verified, what is blocked, and how to work safely here. Last updated 2026-10-14, branch `Agentic_branch`.
 Recovery tag: `agentic-baseline-2026-10-10` (the state before any agentic work - never move or delete it).
+User-facing overview: `README.md`. Web app: `docs/PLATFORM.md`.
 
-## 0. CURRENT STATE (2026-10-12) - read this block first
+## 0. CURRENT STATE (2026-10-14) - read this block first
 
-* **Git:** branch `Agentic_branch`. Last commit `dc4469f4`. **Everything since is UNCOMMITTED** (~35 modified/new files; the user
-  reviews before committing - do not commit unless asked). Recovery tag `agentic-baseline-2026-10-10`. Commits so far:
-  `f00c1129` runtime, `df780de7` Groq offline audit + pacing/quota, `dc4469f4` reasoning-token capture.
-* **Tests:** **507 offline tests pass** (`PYTHONDONTWRITEBYTECODE=1 .venv-agentic/Scripts/python.exe -m pytest -p no:cacheprovider`,
-  ~100 s). No live provider/Tavily/Supabase call is made by any test.
-* **Live history (all user-approved, one run each, n=1):** 2026-10-11 Groq company-profile run `06822d925f55` ended `partial`
-  with 0 claims (local 8,000 TPM guard refused an 8,120-token request; the Lead agent called an undeclared tool -> Groq 400).
-  2026-10-12 Gemini run `0978b29614c6` ended `partial` with 0 claims (Gemini 503 "high demand" on the Company request and the
-  supervisor call; the evidence packet itself was built correctly). **There is still NO successful live company-profile run
-  with the current code.** 2026-10-12 (evening) Gemini field run `001ebec33711` (AIRBUS India, `headquarters`, refresh=true, hybrid,
-  writes off, 4-call cap): Gemini worked (4 requests, 18,270 in / 878 out tokens, no errors) but the run ended `partial`
-  (`max_llm_calls_reached`) with NO verified headquarters: the model quoted a sentence that is NOT in the fetched India page
-  (the page has no 'headquarter' text) and the validator correctly rejected it twice; the change set lists `headquarters` as
-  unresolved. Ranking finding: the packet used two irrelevant regional pages (Europe, Americas) and `press`-penalised the press
-  release that states the New Delhi HQ. 1 Tavily credit (follow-up search; the prefetch search was cached). Provider decision unchanged (docs/PROVIDER_DECISION.md): Gemini 3 Flash default, Groq/Qwen opt-in.
-* **What exists now (details in section 13):** hybrid architecture (Python retrieval/ranking/validation/scoring, LLM only
-  interprets evidence), evidence packets, deterministic objective + field routing, parallel stages, lazy CRM reads,
-  deterministic Lead, field-level requests with a review **change set**, a change-set -> proposal **bridge**, schema
-  contract/gate, offered-tool contract in the executor, finite Gemini timeout, provider capability registry (+ Qwen), and a
-  mandatory local quota guard for live providers. Everything hybrid is **OFF by default**; `AGENTIC_HYBRID=1` turns it on.
-* **Earlier "finalisation pass" (still true):** honest `partial` + `status_reasons`; correction cycle on partial rejection
-  (`AGENTIC_RETRY_PARTIAL=0` disables); strict evidence criterion in `agentic/eval/quality.py`; live defaults gemini /
-  `gemini-3-flash-preview` / `thinking_level=low` / temperature 1.0.
-* **Blockers for calling the project complete:** no successful live run of the packet/hybrid/field flow; the schema introspection WAS run (2026-10-12, section 14: all columns we use exist, RLS on with NO policies, every FK
-  to companies CASCADE-deletes) but change-set proposals are only approvable when `AGENTIC_SCHEMA_FILE` points at it; the
-  Supabase write path itself is still untested live;
-  merge execution does not exist; dashboard not wired; legacy bugs (section 10). See sections 7, 11, 12, 13.
+* **Git:** branch `Agentic_branch`, working tree clean at commit `83ebd3f1` (web platform + bounded enrichment). Earlier commits:
+  `f00c1129` runtime, `df780de7` Groq audit + pacing/quota, `dc4469f4` reasoning tokens, `529c36a2` hybrid retrieval / change sets /
+  schema gate / SELECT cap. Commit only when the user asks (stage by explicit path; never `.env`, `data/`, `.venv-agentic/`).
+* **Tests:** **669 offline tests pass** (`PYTHONDONTWRITEBYTECODE=1 .venv-agentic/Scripts/python.exe -m pytest -p no:cacheprovider`,
+  ~3.5 min). No test makes a live provider/Tavily/Supabase call. Do not assume the count stays valid after changes.
+* **FIRST SUCCESSFUL LIVE ENRICHMENT + FIRST LIVE DATABASE WRITE (2026-10-14, run `d1a95239a22c`, AIRBUS India = company_id 11):**
+  Gemini 3.8 Flash, Company agent, 1 request answered (+1 retry budget), 4,865 in / 632 out tokens, 0 Tavily credits (cache), 6 research
+  SELECTs. Written (user-authorised, additive only): 1 new `company_profile` row (`profile_id` 15: `industry`="Aerospace",
+  `company_summary`=overview text, `confidence_score` 0.6) + 2 sourced `ai_insights` rows (ids 9, 10) = **3 rows**. `companies.website`
+  was deliberately NOT written (the claimed URL was a deep regional page). Read-back confirmed. See section 18 for the caveats:
+  `industry` rests on a heading only (marked INSUFFICIENT by the current rules; replacing it needs explicit overwrite approval).
+* **Live history (all user-approved, small n):** Groq 2026-10-11 and Gemini 2026-10-12 company runs ended `partial` with 0 claims
+  (local TPM guard / Gemini 503). AIRBUS field runs 2026-10-12/13 (`001ebec33711`, `3006a4f6e861`) showed the validator doing its job
+  (fabricated quote rejected) and quality gaps that were then fixed. 2026-10-13/14: `gemini-2.5-flash` returned **404 "no longer
+  available to new users"** for this key (run `d8ed3af25f48`); `gemini-3.8-flash` hit 503 "high demand" repeatedly (`ef68c572714b`,
+  `ff2f6c50edc6`, Procurement-only `e96751b79783`) and succeeded once (`d1a95239a22c`). **Procurement Intelligence has still never
+  completed a live run.** Gemini capacity (503) is the main operational risk; there is NO provider/model fallback by design.
+* **What exists now:** hybrid retrieval + evidence packets; bounded single-request **scoped runs** (Company, then Procurement; pinned-identity
+  Procurement-only); complete-plan **preflight** + atomic quota reservation + 503-only retry + hard per-run request cap; field-meaning
+  validation; site-root website mapping; additive guarded **write phase** (`agentic/apply_validated.py`); read-only **audit** of stored
+  data; and the **web platform** (`serve_platform.py`, `frontend/`, section 17). Hybrid switches (section 13) are still OFF by default.
+* **Blockers for calling the project complete:** Procurement/Contact/Supplier never succeeded live; no productivity baseline (objective 6);
+  merge execution does not exist and no migration is approved; the official Motherson logo is not in the repo; the web app's live-research
+  click-path (UI -> live run -> apply) is untested live; legacy bugs (section 10); dashboard (Next.js) untouched and not wired.
 
 ## 1. What we are building
 
@@ -138,7 +136,7 @@ agentic/            NEW runtime (see section 5)        docs/AGENTIC.md  overview
   supervisor.py     LLM routing + deterministic guards docs/PROVIDER_COMPARISON_PLAN.md
   agents/           company/contact/procurement/       docs/MERGE_EXECUTOR_DESIGN.md (design only)
                     supplier/lead + common.py
-  tools/            registry, web (search/fetch), crm  tests/agentic/   236 offline tests
+  tools/            registry, web (search/fetch), crm  tests/agentic/   669 offline tests
   guards/           executor, budget, url_policy(SSRF) tests/fixtures/  first20.json, duplicate_groups.json
   llm/              base, gemini, groq, fake           api/agentic_routes.py  HTTP contract
   backends/         search(Tavily), fetch, fixtures    pytest.ini, requirements-agentic.txt
@@ -157,6 +155,10 @@ NEW since the map above (2026-10-12, see section 13): `agentic/prefetch.py` (evi
 routing), `fields.py` (field catalog/plan), `parallel.py` (budget partition + merge), `changeset.py`, `claimid.py`,
 `schema_contract.py`, `llm/compat.py`; tests `test_prefetch.py`, `test_context_budget.py`, `test_hybrid.py`,
 `test_hardening.py`, `test_fields.py`, `test_bridge.py`, helper `tests/agentic/fieldllm.py`.
+NEW 2026-10-13/14 (sections 17-18): `agentic/preflight.py`, `company_live.py` (bounded live runner CLI), `field_support.py`, `website_map.py`,
+`apply_validated.py`, `audit_existing.py`, `crm_read.py`, `demo_service.py`, `agentic/demo/first20.json`; `api/platform_app.py`,
+`api/platform_routes.py`, `serve_platform.py`, `START_PLATFORM.bat`, `frontend/` (the web app); tests `test_company_only.py`,
+`test_scoped_enrichment.py`, `test_bounded_retry.py`, `test_persistence_mapping.py`, `test_step_audit.py`, `test_platform.py`.
 
 ## 5. Architecture and key design decisions
 
@@ -212,7 +214,7 @@ check, `company_sector` link table, `merge_audit` table, least-privilege role - 
 
 ## 7. Verified vs unverified
 
-**Verified (507 offline tests; newer items in sections 13-14):** routing and vetoes, tool loop, stopping/limits, errors, quota enforcement, evidence
+**Verified (669 offline tests; newer items in sections 13-18):** routing and vetoes, tool loop, stopping/limits, errors, quota enforcement, evidence
 rules (quote must exist in the ledger; value supported; emails literal), SSRF/size/redirect/robots, redaction,
 approval + resume across restart, write gate, API contracts (and a real local server start), merge planner on the real 79
 duplicate groups, Gemini + Groq adapters against real SDK types, wire-level conformance (0 violations, identical output
@@ -233,7 +235,7 @@ research accuracy, NOT a provider ranking.
 **Unverified:** real-model tool-choice quality over full loops; adaptation after an empty search with a real model;
 prompt-injection resistance of either model (only the pipeline's handling is tested); how real models respond to the
 correction feedback; real Tavily result shapes; real-page extraction accuracy; Supabase write path
-(`SupabaseCommitRepo` only against a fake); RLS / FK delete rules; the introspection SQL (never run); Groq under sustained
+(`SupabaseCommitRepo` was exercised live ONCE on 2026-10-14, section 18; only additive inserts, no update path seen live); RLS policies (none exist; the key bypasses RLS); the introspection SQL WAS run (section 14); Groq under sustained
 paced load (8,000 TPM). The offline evaluations (first-20, graph_eval) use SYNTHETIC `.example` pages and a deterministic
 decision-maker (`PolicyLLM`) with simulated "personas": they test the pipeline, not models, and no productivity baseline
 exists (never claim a gain).
@@ -301,30 +303,33 @@ runtime does not depend on these.
 
 ## 11. Pending decisions / open questions for the user
 
-1. Review and approve committing the finalisation pass (this is the next action).
-2. Whether to authorise any further live evidence (section 8 list) and which provider(s); privacy acceptability of
-   Google's free-tier data use for scraped text.
-3. Run `agentic.fk_introspect.INTROSPECTION_SQL` in the Supabase SQL editor and share the JSON (FK delete rules, uniqueness,
-   RLS) -> regenerate the merge plan with `MergePlanner(source, fk_info=analyze(raw))`.
-4. Approve (or not) additive migrations (`merge_audit`, `company_sector`, executor/restore functions, `merge_executor` role)
-   - for a SCRATCH database first. Merge execution is blocked until then.
-5. Approve git hygiene (`git rm -r --cached .venv`, ignore `__pycache__`) - proposed, not approved.
+1. **AIRBUS India stored data (section 18):** keep, clear or replace `company_profile.industry`="Aerospace" (heading-only evidence)?
+   Which value should `companies.website` / `company_profile.website_domain` get (airbus.com root vs the India page vs empty)?
+   Any change to populated rows needs explicit overwrite approval; `ai_insights` is insert-only in the write gate (no update/delete).
+2. Whether to spend more free-tier quota: another Procurement-only run (needs `--pinned-identity-website`), other companies, or a
+   different model (Gemini 3 Flash window refills on its own; Gemini 2.5 Flash is unavailable to this key).
+3. Official Motherson logo file -> `frontend/assets/motherson-logo.svg|png`.
+4. Approve (or not) additive migrations (`merge_audit`, `company_sector`, executor functions, `merge_executor` role) - SCRATCH db first.
+   Merge execution stays blocked until then.
+5. Git hygiene (`git rm -r --cached .venv`, ignore `__pycache__`) - proposed, not approved.
 6. Duplicates: are the 52 cross-sector groups one multi-sector organisation or distinct? (needs a human rule/sample)
-7. Baseline protocol for objective 6 (30-50 companies, manual timing, gold labels): who times/labels; validation of the
-   pain-point hypotheses.
-8. Which Tavily plan/credits are actually available (never queried); Supabase plan limits (never checked).
+7. Baseline protocol for objective 6 (30-50 companies, manual timing, gold labels): who times/labels; validate pain-point hypotheses.
+8. Tavily plan/credits actually available (the local ledger shows 9 of 300 used in 2026-10; the account was never queried).
+9. Whether/when to wire the Next.js `dashboard/` to the API (the new `frontend/` is a separate app; the dashboard is untouched).
 
 ## 12. Shortest practical next steps
 
-1. (User) Review the uncommitted diff -> approve a commit (stage by path; see section 9).
-2. (User, optional) Decide whether to spend free-tier quota on live evidence: the most valuable single step is one live
-   company-only run (mock tools, ~8 requests, ~17k tokens) on each provider, judged with `evidence_quality_passed`.
-3. (User) Introspection SQL output -> refined merge plan -> executor design review (no migration until approved).
-4. (Offline) Fix/retire legacy bugs in section 10 only where new code should reuse them; wire a real Supabase read repo into
-   a local demo; document the API contract for the dashboard (dashboard stays unchanged until told).
-5. (Later, approved) real-company run with real Tavily (~5 credits), then the baseline study for objective 6.
+1. (User) `git push origin Agentic_branch` (the tree is committed and clean).
+2. (User, optional) Run `START_PLATFORM.bat` and explore (simulation is free). For real research use `serve_platform.py --research live
+   --model gemini-3.8-flash --quota "rpm=5,tpm=250000,rpd=20"` (quota from YOUR console) - the plan panel shows the cost first.
+3. (Needs approval each time) One bounded Procurement-only run for AIRBUS India:
+   `agentic.company_live --agents procurement --pinned-identity-website <India page URL> --fields purchasing_category purchased_component
+   process_note --model gemini-3.8-flash --retries 1 --retry-503-only --total-requests-cap 2 --apply` (preflight first; see section 18).
+4. (Offline) Decide the corrective plan for rows 9/10 and `industry` (`python -m agentic.audit_existing --company-id 11 --load-dotenv`
+   regenerates `data/corrective_plan_company_11.json`, read-only).
+5. (Later, approved) more companies, then the baseline study for objective 6; merge executor design review.
 
-## 13. Work since the finalisation pass (2026-10-11 night -> 2026-10-12). All uncommitted, all offline-tested.
+## 13. Work since the finalisation pass (2026-10-11 night -> 2026-10-12). Committed in `529c36a2`, offline-tested.
 
 **Principle ("hybrid"):** Python does search orchestration, official-domain checks, page ranking, fetching, dedup, caching,
 validation and scoring; the LLM only interprets evidence and submits structured claims. Evidence validation (verbatim quote in
@@ -492,15 +497,70 @@ count as confirmed). Re-run the SQL after any schema change; the current SQL als
 
 ## 17. Web platform (2026-10-14) - `docs/PLATFORM.md`
 
-A local web app for the runtime: `serve_platform.py` (launcher), `api/platform_app.py` + `api/platform_routes.py` (API + static serving),
-`frontend/` (vanilla HTML/CSS/ES modules, no build step), `agentic/crm_read.py` (read-only CRM data: Supabase or the bundled demo set),
-`agentic/demo_service.py` (SIMULATION research: scripted model + synthetic pages, no quota, cannot write). The Next.js `dashboard/` is
-still untouched. Start: `START_PLATFORM.bat` -> http://127.0.0.1:8000/ui/. Research modes: simulation (default) | live (needs `--quota`
-from the AI Studio console) | off; the guarded "apply" action exists only with `--research live --enable-writes` + an access token and
-goes through `agentic/apply_validated.py` (additive, validated, company-scoped, counted SELECTs). Live runs are preflight-checked
-server-side (`POST /platform/estimate` shows the plan; a blocked plan returns 409 and sends nothing). The official Motherson logo is
-NOT in the repo: drop it at `frontend/assets/motherson-logo.svg|png`. Other changes in this session: `preflight` no longer BLOCKS a
-plan only because it exceeds requests/minute (the paced client waits; it blocks only if the waiting alone exceeds the wall-clock limit);
-per-run request caps reset at every run start (`PacedLLM.begin_run`); `ApplyBody.item_ids` lets the approver pick items.
-Verified in headless Chrome against both the demo set and the real 904-company CRM (read-only), zero console errors.
-Unverified: a live research run launched FROM the web app (the same code path as `agentic.company_live`, but not clicked live yet).
+A local web app for the runtime (the Next.js `dashboard/` is untouched): `serve_platform.py` (launcher; `START_PLATFORM.bat`),
+`api/platform_app.py` + `api/platform_routes.py` (API + static serving at `/ui/`), `frontend/` (vanilla HTML/CSS/ES modules, no build
+step, no CDN), `agentic/crm_read.py` (read-only CRM: Supabase or the bundled 20-company demo set `agentic/demo/first20.json`),
+`agentic/demo_service.py` (SIMULATION research: scripted `PolicyLLM` + synthetic `.example` pages; no quota; no commit repository).
+
+* Start: `START_PLATFORM.bat` -> http://127.0.0.1:8000/ui/ (127.0.0.1 only). Modes: `--research simulation` (default) | `live`
+  (needs `--quota "rpm=..,tpm=..,rpd=.."` from the AI Studio console, `--model`, optional `--console-remaining`, `--enable-writes`) | `off`.
+* Screens: sector sidebar + search/sort/group/table, company drawer (coverage grid, sourced evidence, products/contacts), the
+  **"Get information" wizard** (presets + per-field choice -> plan/budget panel from `POST /platform/estimate` -> research timeline ->
+  review of every proposed value with exact quote + URL -> optional guarded apply), Insights, Research runs, light/dark, responsive.
+* Server-side guards: live runs re-run the same preflight (blocked plan = HTTP 409, nothing sent); the apply endpoint
+  (`POST /platform/runs/{id}/apply`) needs live mode + `--enable-writes` + access token + named approver + `confirm=true` and goes
+  through `apply_validated.guarded_write_phase` (counted SELECT cap 40, no delete/upsert/rpc). Contact e-mail/phone are never returned.
+  Page data reaches the DOM only via `textContent`/`setAttribute` (a test bans `innerHTML` with data).
+* The official Motherson logo is NOT in the repo (trademark asset): the header draws a placeholder wordmark until the file
+  `frontend/assets/motherson-logo.svg|png|webp|jpg` exists (server detects it via `status.logo`).
+* Verified in headless Chrome (CDP driver, Node 24 WebSocket; scripts were in the session scratchpad, not the repo) against the demo
+  set AND the real 904-company CRM (read-only), zero console errors, desktop/tablet/phone. NOT verified: a live research run clicked
+  from the UI. Tests: `tests/agentic/test_platform.py`.
+* Env notes: platform live defaults (launcher) = 8 requests max (4 LLM agents x 2 incl. a 503 retry), 160k tokens, 4 credits, 14 SELECTs,
+  wall 600 s, `retry_503_only`. Per-run request caps reset at run start (`PacedLLM.begin_run`).
+
+## 18. Bounded enrichment, persistence mapping and live results (2026-10-13 -> 2026-10-14)
+
+**Bounded scoped runs** (`agentic.company_live`, `runtime.start(scope_agents=..., pinned_identity_website=...)`): Company then Procurement
+(or Procurement-only with a pinned page whose identity is RE-VERIFIED in the run from cache), deterministic routing (`routing.route_scoped`,
+no supervisor LLM, scope violations end the run), ONE structured request per agent (forced `submit_*_findings`, 4096 output tokens, bigger
+packet), empty answers/insufficient packets never trigger a request, optional single correction (`AGENTIC_COMPANY_CORRECTION=1`).
+**Preflight** (`agentic/preflight.py`): complete plan (every permitted request incl. retries), tokens, credits, SELECTs, write plan,
+local usage guard per model key (`gemini:<model>`), unknown quota/usage = BLOCKED (`PREFLIGHT BLOCKED - no external requests sent`);
+exceeding requests/minute is only a note (paced) unless the waiting alone exceeds the wall clock. **Atomic reservation**
+(`Store.usage_reserve`, BEGIN IMMEDIATE) before every request; a request that fails after being sent still counts. **Retry policy:**
+`AGENTIC_RETRY_503_ONLY=1` retries only a 503 capacity error; `AGENTIC_MAX_REQUESTS_TOTAL` hard-caps requests SENT (retries included)
+per run; the second agent is skipped (before any search credit) if the cap has no room. Never a model/provider fallback.
+
+**Evidence rules added** (`agentic/field_support.py`, applied by the Company/Procurement agents AND again before any write): a quote must
+state the field itself - headquarters (headquarters/head office, not "team in X"), revenue (revenue/turnover, not sourcing/spend), founding
+year (founded/established, not "since"), employees, parent, ownership, locations, industry (a definitional statement, not a heading),
+supplier portal / procurement page, and purchases (buying verbs; on the company's own domain or naming the company; "sells" never
+counts). LinkedIn slug must carry the company name. `companies.website` holds the SITE ROOT only (`agentic/website_map.py`: a deep page
+is promoted only if the root was retrieved and the domain verifies; else the change set reports `website_root_not_supported`).
+
+**Persistence mapping** (`fields.canonical_destinations()`): core `companies.website|linkedin_url`; extended `company_profile.*` (ONE row per
+company, DB-unique `company_id`, reused; insert refuses at apply time if a row appeared meanwhile: `profile_already_exists`); insight-only
+`purchasing_category|purchased_component|process_note` -> `ai_insights`; every written core/extended field also gets one provenance
+`ai_insights` row (`insight_type` "Verified <field>", title "<field>: <value>", quote + "(source: URL)" in `insight`, `source_url`),
+deduplicated by (type, title); `companies.revenue`/`company_type` legacy and never written; contacts/suppliers/lead never written
+automatically. `website_domain` is derived-not-written (needs its own reviewed item).
+
+**Write phase** (`agentic/apply_validated.py`, used by `company_live --apply` and the web app): only `fill_empty`/`add_new`, company +
+procurement items of the pinned company, verified, confidence >= 0.60 (first-party), field-meaning re-check, URL shape rule, no U+FFFD,
+max 10 procurement insights, tables `companies`/`company_profile`/`ai_insights` only, scope check on every operation, own SELECT cap 40
+(`CountedClient`, no delete/upsert/rpc), approval recorded in the local audit log. Note the interpretation used: the **research** cap is
+8 SELECTs; the **write phase** has its own cap (reads for stale/duplicate/read-back checks cannot fit in 8) - both are reported.
+
+**Stored for company 11 now:** `company_profile` 15 (industry, company_summary, confidence_score only), `ai_insights` 9 (business overview,
+supported) and 10 (industry, evidence = heading -> INSUFFICIENT by current rules). `companies.website`/`linkedin_url` empty.
+`python -m agentic.audit_existing --company-id 11 --load-dotenv` (read-only, 3 SELECTs) re-judges them and writes a corrective PLAN
+(`data/corrective_plan_company_11.json`); corrective writes need explicit approval and `ai_insights` has no update path.
+
+**Corrections to earlier notes:** the stored quotes do NOT contain U+FFFD - the `�` seen on 2026-10-14 was the console. A real decoding
+weakness was still fixed (`decode_body`: requests' ISO-8859-1 default for undeclared HTML; U+FFFD can no longer enter the ledger).
+
+**Provider facts (2026-10-14):** `gemini-3.8-flash` is registered (Gemini-3 rules: temperature 1.0, `thinking_level`, thought-signature replay;
+free-tier limits per the user's console 5 RPM / 250k TPM / 20 RPD, planning cap 16/24h); `gemini-2.5-flash` returns 404 for this key.
+Windows/tool quirks: write patch scripts with the Write tool (Bash heredocs mangle quotes); use `PYTHONIOENCODING=utf-8` when printing
+page text; headless-Chrome checks are possible via Chrome `--remote-debugging-port` + Node's built-in WebSocket (no installs).
